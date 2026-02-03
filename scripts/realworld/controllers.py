@@ -1,4 +1,15 @@
 #!/usr/bin/env python
+"""
+控制器模块（MPC 与 PID）
+
+用途：
+- `Mpc_controller`：基于模型预测控制（MPC）的轨迹跟踪控制器，适合跟踪服务端返回的连续参考轨迹。
+- `PID_controller`：基于 PD（或 PID 中的 P、D 项）的姿态/速度控制器，适合执行离散动作并增量调整目标位姿。
+
+注意：
+- 本文件仅包含控制算法，不涉及 ROS 通信与感知前处理；
+    实际使用中由客户端节点（例如 http_internvla_client.py）提供里程计、目标轨迹与调用节奏。
+"""
 
 import math
 import os
@@ -14,6 +25,11 @@ from scipy.interpolate import interp1d
 class Mpc_controller:
     def __init__(self, global_planed_traj, N=20, desired_v=0.3, v_max=0.4, w_max=0.4, ref_gap=4):
         """Initialize the MPC controller.
+
+        中文说明：
+        - 初始化 MPC 控制器，构建基于非线性优化的轨迹跟踪问题。
+        - 预测域长度 `N`、参考点间隔 `ref_gap`、时间步长 `T=0.1s` 共同决定控制频率与参考采样密度。
+        - 通过 `v_max`、`w_max` 约束线速度与角速度，`desired_v` 影响参考点的弧长采样节奏。
 
         Args:
             global_planed_traj (np.ndarray): The global planned trajectory, shape (n, 2).
@@ -90,6 +106,15 @@ class Mpc_controller:
         self.last_opt_u_controls = None
 
     def make_ref_denser(self, ref_traj, ratio=50):
+        """将稀疏参考轨迹插值加密
+
+        参数：
+        - `ref_traj`：形状 (n, 2) 的 xy 参考点序列。
+        - `ratio`：每段线性插值的加密倍率（越大越密）。
+
+        返回：
+        - 加密后的参考轨迹（(n*ratio, 2)）。
+        """
         x_orig = np.arange(len(ref_traj))
         new_x = np.linspace(0, len(ref_traj) - 1, num=len(ref_traj) * ratio)
 
@@ -103,10 +128,25 @@ class Mpc_controller:
         return ref_traj
 
     def update_ref_traj(self, global_planed_traj):
+        """更新全局参考轨迹并重计算参考长度计数
+
+        注意：`ref_traj_len = N // ref_gap + 1` 与 MPC 代价中采样点数量一致。
+        """
         self.ref_traj = self.make_ref_denser(global_planed_traj)
         self.ref_traj_len = self.N // self.ref_gap + 1
 
     def solve(self, x0):
+        """求解一次 MPC 优化，得到控制序列与状态序列
+
+        参数：
+        - `x0`：当前状态 `[x, y, yaw]`
+
+        流程：
+        - 从加密后的全局轨迹中，基于当前位置选取一定弧长间隔的参考点（`find_reference_traj`）。
+        - 将参考点拼接为 `[x, y, 0]`（此处 yaw 作为 0 的占位，可扩展为有向参考）。
+        - 设置初值与参数，调用 IPOPT 求解器求解。
+        - 返回最优控制与状态，用于控制线程取第一步指令。
+        """
         ref_traj = self.find_reference_traj(x0, self.ref_traj)
         # fake a yaw angle
         ref_traj = np.concatenate((ref_traj, np.zeros((ref_traj.shape[0], 1))), axis=1).reshape(-1, 1)
@@ -127,10 +167,19 @@ class Mpc_controller:
         return self.last_opt_u_controls, self.last_opt_x_states
 
     def reset(self):
+        """重置 MPC 的初值缓存（下次求解将不使用上次解的 warm start）"""
         self.last_opt_x_states = None
         self.last_opt_u_controls = None
 
     def find_reference_traj(self, x0, global_planed_traj):
+        """基于当前位置 `x0` 在全局轨迹中选取参考点序列
+
+        逻辑：
+        - 找到与当前位置最近的全局轨迹点 `nearest_idx`；
+        - 计算累计弧长 `cum_dist`；
+        - 以 `desired_v * ref_gap * T` 作为步长弧长，依次选取参考点，直至达到 `ref_traj_len`；
+        - 若不足则重复最后一个点。
+        """
         ref_traj_pts = []
         # find the nearest point in global_planed_traj
         nearest_idx = np.argmin(np.linalg.norm(global_planed_traj - x0[:2].reshape((1, 2)), axis=1))
@@ -153,6 +202,11 @@ class PID_controller:
     def __init__(self, Kp_trans=1.0, Kd_trans=0.1, Kp_yaw=1.0, Kd_yaw=1.0, max_v=1.0, max_w=1.2):
         """Initialize the PID controller.
 
+        中文说明：
+        - 简化的 PD 控制（未包含 I 项）。
+        - `Kp_trans/Kd_trans` 针对平移误差，`Kp_yaw/Kd_yaw` 针对朝向误差。
+        - `max_v/max_w` 用于限幅，保证输出速度在安全范围内。
+
         Args:
             Kp_trans (float): Proportional gain for translational error.
             Kd_trans (float): Derivative gain for translational error.
@@ -169,11 +223,22 @@ class PID_controller:
         self.max_w = max_w
 
     def solve(self, odom, target, vel=np.zeros(2)):
+        """计算一次控制输出
+
+        参数：
+        - `odom`：当前位置的 4x4 齐次变换（仅用到前 2x2 旋转与位移）
+        - `target`：目标位姿的 4x4 齐次变换
+        - `vel`：当前线/角速度 `[v, w]`，用于 D 项
+
+        返回：
+        - `v, w, translation_error, yaw_error`
+        """
         translation_error, yaw_error = self.calculate_errors(odom, target)
         v, w = self.pd_step(translation_error, yaw_error, vel[0], vel[1])
         return v, w, translation_error, yaw_error
 
     def pd_step(self, translation_error, yaw_error, linear_vel, angular_vel):
+        """PD 步进计算：按误差与当前速度给出限幅后的控制量"""
         translation_error = max(-1.0, min(1.0, translation_error))
         yaw_error = max(-1.0, min(1.0, yaw_error))
 
@@ -186,6 +251,11 @@ class PID_controller:
         return linear_velocity, angular_velocity
 
     def calculate_errors(self, odom, target):
+        """计算平移与航向误差（在机器人本体坐标系）
+
+        - 平移误差取目标相对位移在本体系前向的投影（前向为正）。
+        - 航向误差取 `target_yaw - odom_yaw`，并归一化到 [-pi, pi]。
+        """
 
         dx = target[0, 3] - odom[0, 3]
         dy = target[1, 3] - odom[1, 3]

@@ -122,6 +122,7 @@ class InternVLAN1MetaModel:
     def __init__(self, config):
         super(InternVLAN1MetaModel, self).__init__(config)
         if hasattr(config, "system1"):
+            #一个可学习的参数，表示轨迹查询的潜在向量
             self.latent_queries = nn.Parameter(torch.randn(1, config.n_query, config.hidden_size))
 
             if 'nextdit' in config.system1:

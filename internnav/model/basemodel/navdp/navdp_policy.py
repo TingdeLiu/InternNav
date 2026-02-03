@@ -21,7 +21,7 @@ class NavDPModelConfig(PretrainedConfig):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # pass in navdp_exp_cfg
+        # 传入 navdp 实验配置，便于 HuggingFace 配置体系保存/加载
         self.model_cfg = kwargs.get('model_cfg', None)
 
     @classmethod
@@ -36,6 +36,7 @@ class NavDPNet(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        # 兼容 HuggingFace 加载流程：优先使用显式传入的 config
         config = kwargs.pop('config', None)  # navdp_exp_cfg_dict_NavDPModelConfig
         if config is None:
             config = cls.config_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
@@ -47,7 +48,7 @@ class NavDPNet(PreTrainedModel):
         model = cls(config)
         model.to(model._device)
 
-        # load pretrained weights
+        # 加载预训练权重（支持目录或文件路径）
         if os.path.isdir(pretrained_model_name_or_path):
             incompatible_keys, _ = model.load_state_dict(
                 torch.load(os.path.join(pretrained_model_name_or_path, 'pytorch_model.bin'))
@@ -70,6 +71,7 @@ class NavDPNet(PreTrainedModel):
             self.model_config = ModelCfg(**config.model_cfg['model'])
         else:
             self.model_config = config
+        # 提前读取核心超参，便于后续模块构建
         self.config.model_cfg['il']
         self._device = torch.device(f"cuda:{config.model_cfg['local_rank']}")
         self.image_size = self.config.model_cfg['il']['image_size']
@@ -97,6 +99,7 @@ class NavDPNet(PreTrainedModel):
                 p.requires_grad = False
             self.rgbd_encoder.rgb_model.eval()
 
+        # Transformer 解码器用于条件扩散去噪
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.token_dim,
             nhead=self.attention_heads,
@@ -119,6 +122,7 @@ class NavDPNet(PreTrainedModel):
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=10, beta_schedule='squaredcos_cap_v2', clip_sample=True, prediction_type='epsilon'
         )
+        # 自回归掩码，防止解码器窥视未来动作
         self.tgt_mask = (torch.triu(torch.ones(self.predict_size, self.predict_size)) == 1).transpose(0, 1)
         self.tgt_mask = (
             self.tgt_mask.float()
@@ -127,6 +131,7 @@ class NavDPNet(PreTrainedModel):
         )
         self.tgt_mask = self.tgt_mask.to(self._device)
 
+        # 评论器的条件掩码：屏蔽前 4 个占位 goal token
         self.cond_critic_mask = torch.zeros((self.predict_size, 4 + self.memory_size * 16))
         self.cond_critic_mask[:, 0:4] = float('-inf')
 
@@ -146,6 +151,7 @@ class NavDPNet(PreTrainedModel):
         return self
 
     def sample_noise(self, action):
+        # 在扩散训练中为标签动作添加噪声并生成时间嵌入
         device = action.device
         noise = torch.randn(action.shape, device=device)
         timesteps = torch.randint(
@@ -157,6 +163,7 @@ class NavDPNet(PreTrainedModel):
         return noise, time_embeds, noisy_action_embed
 
     def predict_noise(self, last_actions, timestep, goal_embed, rgbd_embed):
+        # 条件去噪网络，预测给定时间步的噪声残差
         action_embeds = self.input_embed(last_actions)
         time_embeds = self.time_emb(timestep.to(self._device)).unsqueeze(1)
         cond_embedding = torch.cat(
@@ -170,6 +177,7 @@ class NavDPNet(PreTrainedModel):
         return output
 
     def predict_critic(self, predict_trajectory, rgbd_embed):
+        # 评论器网络，估计整条轨迹的价值分数
         repeat_rgbd_embed = rgbd_embed.repeat(predict_trajectory.shape[0], 1, 1)
         nogoal_embed = torch.zeros_like(repeat_rgbd_embed[:, 0:1])
         action_embeddings = self.input_embed(predict_trajectory)
@@ -185,6 +193,7 @@ class NavDPNet(PreTrainedModel):
         return critic_output
 
     def forward(self, goal_point, goal_image, goal_pixel, input_images, input_depths, output_actions, augment_actions):
+        # 训练前向：同时训练去噪器、评论器与辅助任务
         device = next(self.parameters()).device
 
         assert input_images.shape[1] == self.memory_size
@@ -219,7 +228,7 @@ class NavDPNet(PreTrainedModel):
         cand_goal_embed = [pointgoal_embed, imagegoal_embed, pixelgoal_embed]
         batch_size = pointgoal_embed.shape[0]
 
-        # Generate deterministic selections for each sample in the batch using vectorized operations
+        # 为每个样本确定性选择三种目标组合（点/图像/像素），覆盖 27 种排列
         batch_indices = torch.arange(batch_size, device=pointgoal_embed.device)
         pattern_indices = batch_indices % 27  # 3^3 = 27 possible combinations
         selections_0 = pattern_indices % 3
@@ -298,6 +307,7 @@ class NavDPNet(PreTrainedModel):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def predict_pointgoal_batch_action_vel(self, goal_point, input_images, input_depths, sample_num=32):
+        # 仅使用点目标推理：批量采样扩散轨迹并用评论器筛选优劣
         with torch.no_grad():
             tensor_point_goal = torch.as_tensor(goal_point, dtype=torch.float32, device=self._device)
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
@@ -319,6 +329,7 @@ class NavDPNet(PreTrainedModel):
             return negative_trajectory, positive_trajectory
 
     def predict_nogoal_batch_action_vel(self, input_images, input_depths, sample_num=32):
+        # 无目标推理：纯依赖视觉记忆生成轨迹并用评论器排序
         with torch.no_grad():
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
             nogoal_embed = torch.zeros_like(rgbd_embed[:, 0:1])

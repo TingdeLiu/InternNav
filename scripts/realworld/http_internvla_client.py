@@ -1,3 +1,20 @@
+"""
+实车/真实环境客户端（ROS2）
+
+功能概述：
+- 订阅相机 RGB 与对齐深度图（Realsense 等），并做必要的格式转换与时间戳记录。
+- 订阅里程计（`/odom_bridge`），构建位姿与速度信息，维护短历史队列用于与图像时间对齐。
+- 将当前帧的 RGB/深度以 `multipart/form-data` 发送到服务端 `/eval_dual`，并根据返回结果选择控制模式：
+    - 连续轨迹 → MPC 控制器跟踪
+    - 离散动作 → PID 控制器按步执行（增量更新目标）
+- 通过 `/cmd_vel_bridge` 发布速度指令，实现移动控制。
+
+使用说明：
+- 首次请求会携带 `reset=true` 以重置服务端 Agent 的内部状态，后续请求为增量推理。
+- 线程说明：
+    - `planning_thread`：完成对齐、HTTP 推理、解释响应与更新控制参考。
+    - `control_thread`：读取最新参考，根据当前模式调用 MPC/PID，发布控制指令。
+"""
 import copy
 import io
 import json
@@ -30,8 +47,13 @@ class ControlMode(Enum):
     PID_Mode = 1
     MPC_Mode = 2
 
+    """控制模式枚举
+    - `PID_Mode`：使用 PID 控制器，基于离散动作增量更新目标位姿。
+    - `MPC_Mode`：使用 MPC 控制器，跟踪服务端返回的连续参考轨迹。
+    """
 
-# global variable
+
+# 全局变量：跨线程共享状态（注意读写锁保护）
 policy_init = True
 mpc = None
 pid = PID_controller(Kp_trans=2.0, Kd_trans=0.0, Kp_yaw=1.5, Kd_yaw=0.0, max_v=0.6, max_w=0.5)
@@ -50,6 +72,21 @@ mpc_rw_lock = ReadWriteLock()
 
 
 def dual_sys_eval(image_bytes, depth_bytes, front_image_bytes, url='http://127.0.0.1:5801/eval_dual'):
+    """将当前帧 RGB/Depth 提交到服务端进行推理
+
+    参数：
+    - `image_bytes`：RGB 图像的 JPEG 字节流（BytesIO）
+    - `depth_bytes`：深度图的 PNG 字节流（BytesIO），内部单位为米并按 1/10000 缩放成 16-bit 保存
+    - `front_image_bytes`：可选的前视相机图像（当前未使用）
+    - `url`：服务端推理接口地址（默认本地 5801）
+
+    行为：
+    - 首次调用携带 `reset=true`，服务端重置 Agent 内部状态。
+    - 采用 `multipart/form-data` 上传图像，`data.json` 字段传递控制标志与索引。
+
+    返回：
+    - 服务端 JSON 响应，包含 `trajectory` 或 `discrete_action` 字段。
+    """
     global policy_init, http_idx, first_running_time
     data = {"reset": policy_init, "idx": http_idx}
     json_data = json.dumps(data)
@@ -71,6 +108,14 @@ def dual_sys_eval(image_bytes, depth_bytes, front_image_bytes, url='http://127.0
 
 
 def control_thread():
+    """控制线程
+
+    周期性读取里程计与参考（轨迹或目标位姿），根据 `current_control_mode`：
+    - MPC 模式：调用 `mpc.solve` 生成最优控制量并发布。
+    - PID 模式：调用 `pid.solve` 根据误差计算速度并发布。
+
+    使用读写锁保护共享状态，避免与规划线程竞争导致不一致。
+    """
     global desired_v, desired_w
     while True:
         global current_control_mode
@@ -104,6 +149,16 @@ def control_thread():
 
 
 def planning_thread():
+    """规划/推理线程
+
+    流程：
+    1. 等待新图像到达，读取 RGB/深度字节与时间戳。
+    2. 在里程计队列中查找与图像时间最接近的位姿，作为推理时的相机/机器人状态。
+    3. 调用 `dual_sys_eval` 请求服务端推理，解析响应：
+       - `trajectory`：转换到世界坐标，更新 `mpc` 参考轨迹，并切换到 `MPC_Mode`。
+       - `discrete_action`：增量更新目标位姿，并切换到 `PID_Mode`。
+    4. 控制周期节流，保证线程占用合理。
+    """
     global trajs_in_world
 
     while True:
@@ -158,7 +213,7 @@ def planning_thread():
                     if i < 3:
                         continue
                     x_, y_, yaw_ = odom[0], odom[1], odom[2]
-
+                    # 里程计位姿到世界坐标的齐次变换矩阵 w_T_b
                     w_T_b = np.array(
                         [
                             [np.cos(yaw_), -np.sin(yaw_), 0, x_],
@@ -197,6 +252,18 @@ def planning_thread():
 
 
 class Go2Manager(Node):
+    """ROS2 节点管理器
+
+    订阅：
+    - `/camera/camera/color/image_raw`：RGB 图像
+    - `/camera/camera/aligned_depth_to_color/image_raw`：对齐深度图
+    - `/odom_bridge`：里程计
+
+    发布：
+    - `/cmd_vel_bridge`：速度控制（Twist）
+
+    负责：图像/深度编码为字节流，维护时间戳与里程计队列，提供增量目标更新与控制发布接口。
+    """
     def __init__(self):
         super().__init__('go2_manager')
 
@@ -240,6 +307,10 @@ class Go2Manager(Node):
         self.vel = None
 
     def rgb_forward_callback(self, rgb_msg):
+        """可选的前向相机回调（未与服务端交互，仅用于可视化/调试）
+
+        将 ROS 图像转换为 JPEG 字节流，标记新图像到达。
+        """
         raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')[:, :, :]
         self.rgb_forward_image = raw_image
         image = PIL_Image.fromarray(self.rgb_forward_image)
@@ -251,6 +322,12 @@ class Go2Manager(Node):
         self.new_image_arrived = True
 
     def rgb_depth_down_callback(self, rgb_msg, depth_msg):
+        """RGB+深度同步回调
+
+        - RGB：转换为 JPEG 字节流，记录时间戳。
+        - 深度：将 16-bit 深度转换为米单位的浮点，再压缩为 PNG（按 1/10000 缩放到 0-65535）。
+        - 使用写锁更新共享字节流与时间戳，标记新图像到达。
+        """
         raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')[:, :, :]
         self.rgb_image = raw_image
         image = PIL_Image.fromarray(self.rgb_image)
@@ -286,6 +363,12 @@ class Go2Manager(Node):
         self.new_image_arrived = True
 
     def odom_callback(self, msg):
+        """里程计回调
+
+        - 计算航向角 `yaw`，更新当前位置与速度。
+        - 将当前里程计与时间戳加入队列，用于与图像时间对齐。
+        - 构建 2D 齐次变换 `homo_odom` 供 PID 控制器使用。
+        """
         self.odom_cnt += 1
         odom_rw_lock.acquire_write()
         zz = msg.pose.pose.orientation.z
@@ -308,6 +391,14 @@ class Go2Manager(Node):
             self.homo_goal = self.homo_odom.copy()
 
     def incremental_change_goal(self, actions):
+        """基于离散动作增量更新目标位姿
+
+        动作定义（示例）：
+        - 0：保持
+        - 1：沿当前朝向前进 0.25 m
+        - 2：左转 15°（绕 z 轴）
+        - 3：右转 15°（绕 z 轴）
+        """
         if self.homo_goal is None:
             raise ValueError("Please initialize homo_goal before change it!")
         homo_goal = self.homo_odom.copy()
@@ -333,6 +424,13 @@ class Go2Manager(Node):
         self.homo_goal = homo_goal
 
     def move(self, vx, vy, vyaw):
+        """发布速度控制
+
+        参数：
+        - `vx`：前向线速度（m/s）
+        - `vy`：侧向线速度（当前未使用，固定为 0）
+        - `vyaw`：角速度（rad/s）
+        """
         request = Twist()
         request.linear.x = vx
         request.linear.y = 0.0

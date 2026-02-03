@@ -24,6 +24,16 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+checkpoints/
+test_data/
+scripts/notebooks/
+logs/
+data/
+assets/
+.claude/
+datasets/
+output/
+scripts/notebooks/checkpoints/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

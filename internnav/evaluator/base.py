@@ -18,7 +18,7 @@ class Evaluator:
     def eval(self):
         raise NotImplementedError
 
-    @classmethod
+    @classmethod #类方法，它能够读取或修改类级别的变量
     def register(cls, evaluator_type: str):
         """
         Register a evaluator class.

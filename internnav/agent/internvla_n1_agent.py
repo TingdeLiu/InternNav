@@ -31,6 +31,7 @@ class InternVLAN1Agent(Agent):
         super().__init__(config)
         set_random_seed(0)
         vln_sensor_config = self.config.model_settings
+        # 读取模型/传感器配置并实例化模型设置
         self._model_settings = ModelCfg(**vln_sensor_config)
         self.device = torch.device(self._model_settings.device)
         self.mode = getattr(self._model_settings, 'infer_mode', 'sync')
@@ -39,6 +40,7 @@ class InternVLAN1Agent(Agent):
         policy = get_policy(self._model_settings.policy_name)
         policy_config = get_config(self._model_settings.policy_name)
         model_config = {'model': self._model_settings.model_dump()}
+        # 初始化策略（含 Sys1/ Sys2 双系统）
         self.policy = policy(config=policy_config(model_cfg=model_config))
         self.policy.eval()
 
@@ -50,7 +52,7 @@ class InternVLAN1Agent(Agent):
         self.episode_idx = 0
         self.look_down = False
 
-        # for async dual sys
+        # 异步双系统相关缓存
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
         self.dual_forward_step = 0
@@ -64,18 +66,18 @@ class InternVLAN1Agent(Agent):
         self.s2_output = S2Output()
         self.s1_output = S1Output()
 
-        # Thread management
+        # 线程控制（Sys2 独立推理线程）
         self.s2_thread = None
 
-        # Thread locks
+        # 互斥锁：保护输入、输出与模型状态
         self.s2_input_lock = threading.Lock()
         self.s2_output_lock = threading.Lock()
         self.s2_agent_lock = threading.Lock()
 
-        # Start S2 thread
+        # 启动 Sys2 推理线程
         self._start_s2_thread()
 
-        # vis debug
+        # 可视化调试：录像与像素目标显示
         self.vis_debug = vln_sensor_config['vis_debug']
         if self.vis_debug:
             self.debug_path = vln_sensor_config['vis_debug_path']
@@ -102,13 +104,13 @@ class InternVLAN1Agent(Agent):
             self.s2_output = S2Output()
         self.s1_output = S1Output()
 
-        # for async dual sys
+        # 异步双系统状态清理
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
         self.dual_forward_step = 0
         self.sys1_infer_times = 0
 
-        # Reset s2 agent
+        # 重置 Sys2 策略内部状态
         with self.s2_agent_lock:
             self.policy.reset()
 
@@ -117,6 +119,7 @@ class InternVLAN1Agent(Agent):
             self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_dp.mp4", fps=5)
 
     def get_intrinsic_matrix(self, width, height, hfov) -> np.ndarray:
+        # 由传感器分辨率与视场角计算相机内参（齐次形式）
         width = width
         height = height
         fov = hfov
@@ -152,7 +155,7 @@ class InternVLAN1Agent(Agent):
                 #         time.sleep(0.5)  # Sleep briefly if already inferring
                 #         continue
 
-                # Execute inference
+                # 执行 Sys2 推理，若失败尝试一次无下视退路
                 success = True
                 try:
                     with self.s2_agent_lock:
@@ -189,7 +192,7 @@ class InternVLAN1Agent(Agent):
                         continue
 
                 print("s2 infer finish!!")
-                # Update output state
+                # 推理完成后写回输出并记录索引与缓存帧
                 with self.s2_output_lock:
                     print("get s2 output lock")
                     # S2 output
@@ -249,7 +252,7 @@ class InternVLAN1Agent(Agent):
         instruction = obs['instruction']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 
-        # S2 inference is done in a separate thread
+        # Sys2 推理在独立线程执行；必要时触发，并记录输入
         if self.should_infer_s2(mode) or self.look_down:  # The look down frame must be inferred
             print(f"======== Infer S2 at step {self.episode_step}========")
             with self.s2_input_lock:
@@ -264,9 +267,9 @@ class InternVLAN1Agent(Agent):
 
             self.dual_forward_step = 0
         else:
-            # Even if this frame doesn't do s2 inference, rgb needs to be provided to ensure history is correct
+            # 未触发 S2 时仍需缓存 RGB 以保持历史序列完整
             self.policy.step_no_infer(rgb, depth, pose)
-        # S1 inference is done in the main thread
+        # Sys1 推理在主线程执行，需等待 Sys2 输出可用
         while self.s2_output.is_infering:
             time.sleep(0.5)
 
@@ -274,8 +277,7 @@ class InternVLAN1Agent(Agent):
             time.sleep(0.2)
 
         output = {}
-        # Simple branch:
-        # 1. If S2 output is full discrete actions, don't execute S1 and return directly
+        # 分支 1：若 S2 直接给出离散动作，优先返回动作，不走 Sys1
         print('===============', self.s2_output.output_action, '=================')
         if self.s2_output.output_action is not None:
             output['action'] = [self.s2_output.output_action[0]]
@@ -285,6 +287,7 @@ class InternVLAN1Agent(Agent):
                 if self.s2_output.output_action == []:
                     self.s2_output.output_action = None
             if output['action'][0] == 5:
+                # 下视动作：清空缓存，避免重复执行
                 self.look_down = True
                 # Clear action list when looking down
                 with self.s2_output_lock:
@@ -300,7 +303,7 @@ class InternVLAN1Agent(Agent):
 
         else:
             self.look_down = False
-            # 2. If output is in latent form, execute latent S1
+            # 分支 2：若为潜变量，交给 Sys1 生成轨迹/动作
             if self.s2_output.output_latent is not None:
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
                 print(self.output_pixel)
@@ -333,6 +336,7 @@ class InternVLAN1Agent(Agent):
                     )  # [1, 2, 224, 224, 1]
                     self.s1_output = self.policy.s1_step_latent(rgbs, depths, self.s2_output.output_latent)
                 else:
+                    # 同步模式下直接使用原始尺度
                     self.s1_output = self.policy.s1_step_latent(rgb, depth * 10000.0, self.s2_output.output_latent)
 
             else:
@@ -371,7 +375,7 @@ class InternVLAN1Agent(Agent):
 
         print('Output discretized traj:', output['action'], self.dual_forward_step)
 
-        # Visualization
+        # 可视化：叠加动作/像素目标信息并写入调试视频
         if self.vis_debug:
             vis = rgb.copy()
             if 'action' in output:

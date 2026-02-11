@@ -16,6 +16,7 @@ def serialize_obs(obs):
 class AgentClient:
     """
     Client class for Agent service.
+    客户端用于与 Agent 服务交互，负责发起初始化、推理步进和重置请求。
     """
 
     def __init__(self, config: AgentCfg):

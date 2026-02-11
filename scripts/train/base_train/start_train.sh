@@ -25,7 +25,7 @@ done
 # Set GPU devices and NUM_GPUS
 case $MODEL in
     "rdp")
-        export CUDA_VISIBLE_DEVICES=0,1,2,3
+        export CUDA_VISIBLE_DEVICES=6,7
         NUM_GPUS=4
         ;;
     "cma")
@@ -75,12 +75,12 @@ if [[ "$MODEL" == "navdp" ]]; then
         --node_rank=0 \
         --master_addr=localhost \
         --master_port=12345 \
-        scripts/base_train/train.py \
+        scripts/train/base_train/train.py \
         --name "$NAME" \
         --model-name "$MODEL"
 else
     echo "Using python to start $MODEL training, using $NUM_GPUS GPUs (CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES)"
-    python scripts/base_train/train.py \
+    python scripts/train/base_train/train.py \
         --name "$NAME" \
         --model-name "$MODEL"
 fi

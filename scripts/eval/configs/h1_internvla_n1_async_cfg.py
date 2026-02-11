@@ -16,7 +16,7 @@ eval_cfg = EvalCfg(
         model_settings={
             'env_num': 1,
             'sim_num': 1,
-            'model_path': "checkpoints/InternVLA-N1-DualVLN",
+            'model_path': "checkpoints/InternVLA-N1-DualVLN", #InternVLA-N1-DualVLN (rgb) / InternVLA-N1-wo-dagger (old) / InternVLA-N1-w-NavDP (new)
             'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],
             'width': 640,
             'height': 480,
@@ -53,7 +53,7 @@ eval_cfg = EvalCfg(
         },
         scene=SceneCfg(
             scene_type='mp3d',
-            scene_data_dir='data/scene_data/mp3d_pe',
+            scene_data_dir='data/scene_data/mp3d_pe', #mp3d_pe
         ),
         robot_name='h1',
         robot_flash=True,  # If robot_flash is True, the mode is flash (set world_pose directly); else you choose physical mode.
@@ -63,20 +63,20 @@ eval_cfg = EvalCfg(
         camera_prim_path='torso_link/h1_1_25_down_30',
         one_step_stand_still=True,  # For dual-system, please keep this param True.
     ),
-    dataset=EvalDatasetCfg(
+    dataset=EvalDatasetCfg(  #来源: R2R 数据集的 MP3D 场景
         dataset_type="mp3d",
         dataset_settings={
-            'base_data_dir': 'data/vln_pe/raw_data/r2r',
+            'base_data_dir': 'data/vln_pe/raw_data/r2r',  
             'split_data_types': ['val_unseen'],  # 'val_seen'
             'filter_stairs': True,  # For iros challenge, this is False; For results in the paper, this is True.
-            # 'selected_scans': ['zsNo4HB9uLZ'],
+            #'selected_scans': ['zsNo4HB9uLZ'],
             # 'selected_scans': ['8194nk5LbLH', 'pLe4wQe7qrG'],
         },
     ),
     eval_type='vln_distributed',
     eval_settings={
         'save_to_json': True,
-        'vis_output': True,
-        'use_agent_server': False,  # If use_agent_server=True, please start the agent server first.
+        'vis_output': True, # If vis_output=True, you can get visualization results like videos.
+        'use_agent_server': False,  # If use_agent_server=True, please start the agent server first.s
     },
 )

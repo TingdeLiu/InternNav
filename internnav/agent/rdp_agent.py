@@ -37,6 +37,7 @@ class RdpAgent(Agent):
     def __init__(self, config: AgentCfg):
         super().__init__(config)
         set_seed_model(0)
+        # 读取 agent 配置并实例化模型设置
         self._model_settings = self.config.model_settings
         self._model_settings = ModelCfg(**self._model_settings)
         env_num = getattr(self._model_settings, 'env_num', 1)
@@ -58,6 +59,7 @@ class RdpAgent(Agent):
         self._first_step = np.array([True] * self._env_nums)
 
         # instruction_encoder
+        # 文本编码策略：支持 roberta / clip-long，两者均复用 bert_tokenizer 接口
         self.use_clip_encoders = True
         self.use_bert = False
         self.bert_tokenizer = None
@@ -88,6 +90,7 @@ class RdpAgent(Agent):
         log.debug(f'new reset_ls: {self._reset_ls}')
 
     def _reset(self):
+        # 重置内部状态（按需增量或全量），涵盖 RNN 状态、动作缓存、历史轨迹等
         reset_ls = list(self._reset_ls)
         if len(reset_ls) == 0:
             self._rnn_states = torch.zeros(
@@ -147,6 +150,7 @@ class RdpAgent(Agent):
             self._reset_ls = set(reset_ls)  # use for record start positions and rotations
 
     def _set_init_attrs(self, obs):
+        # 记录 episode 起始的全局位姿，供 IMU/局部坐标转换使用
         start_positions = np.array([x['globalgps'][[0, 1]] for x in obs])
         new_start_positions = np.stack(start_positions[list(self._reset_ls)], axis=0)
         self.start_positions[list(self._reset_ls)] = torch.from_numpy(new_start_positions).to(self.device)
@@ -156,6 +160,7 @@ class RdpAgent(Agent):
         self.start_yaws[list(self._reset_ls)] = torch.from_numpy(new_start_yaws).to(self.device)
 
     def _cal_prev_actions(self):
+        # 从历史全局轨迹反算过去若干步的动作增量，用于条件扩散或 RNN 输入
         for idx in range(self._env_nums):
             if idx in self._reset_ls:
                 continue
@@ -190,6 +195,7 @@ class RdpAgent(Agent):
         return (len(self.action_cache[0]) == 0 and len(self._reset_ls) > 0) or (len(self._reset_ls) >= self._env_nums)
 
     def _process_obs(self, obs):
+        # 预处理观测：提取航向、文本编码、图像特征、IMU/局部坐标
         # transfer globalyaw
         for _, observation in enumerate(obs):
             observation['globalyaw'] = quat_to_euler_angles(observation['globalrotation'])[-1]

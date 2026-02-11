@@ -60,7 +60,7 @@ class DialogAgent(Agent):
         self.agent_config = agent_config
         self.task_name = self.agent_config.model_settings['task_name']
 
-        # sensor config
+        # 传感器配置：主要用于后续像素→三维坐标的反投影
         self.sim_sensors_config = self.agent_config.model_settings['sim_sensors_config']
         self._camera_height = self.sim_sensors_config.rgb_sensor.position[1]
         self._min_depth = self.sim_sensors_config.depth_sensor.min_depth
@@ -68,7 +68,7 @@ class DialogAgent(Agent):
         self._camera_fov = np.deg2rad(self.sim_sensors_config.depth_sensor.hfov)
         self._fx = self._fy = self.sim_sensors_config.depth_sensor.width / (2 * np.tan(self._camera_fov / 2))
 
-        # model
+        # 模型参数与模式
         self.model_args = argparse.Namespace(**self.agent_config.model_settings)
 
         self.task = self.model_args.task
@@ -76,6 +76,7 @@ class DialogAgent(Agent):
         self.resize_h = self.model_args.resize_h
         self.resize_w = self.model_args.resize_w
 
+        # 文本/多模态处理器与模型加载
         tokenizer = AutoTokenizer.from_pretrained(self.model_args.model_path, use_fast=True)
         processor = AutoProcessor.from_pretrained(self.model_args.model_path)
         processor.tokenizer = tokenizer
@@ -100,7 +101,7 @@ class DialogAgent(Agent):
         self.processor = processor
         self.num_history = self.model_args.num_history
 
-        # prompt
+        # 基础对话提示词，区分是否启用对话模式
         if 'dialog' in self.task_name or self.agent_config.model_settings['dialog_enabled']:
             prompt = "You are an autonomous navigation assistant. Your task is to <instruction>. Where should you go next to stay on track? There is an oracle can help you to complete the task in current environment, you can either choose to move or talk. If choosing to talk, please say something that can help you better to find the target object. If choosing to move, when you want to output a waypoint you need to TILT DOWN (↓) by 30 degrees then output the next waypoint\'s coordinates in the image. In case the next waypoint is out of view, utilize the turn actions: TURN LEFT (←) or TURN RIGHT (→) by 15 degrees. Please output STOP when you have successfully completed the task."
         else:
@@ -129,7 +130,7 @@ class DialogAgent(Agent):
         )
 
     def convert_input(self, obs, info):
-        # update new information after env.step
+        # 更新 env.step 后的观测，处理深度与 RGB，构建当前相机位姿
         depth = obs["depth"]
         depth = filter_depth(depth.reshape(depth.shape[:2]), blur_type=None)
         depth = depth * (self._max_depth - self._min_depth) + self._min_depth
@@ -137,7 +138,7 @@ class DialogAgent(Agent):
 
         rgb = obs["rgb"]
         image = Image.fromarray(rgb).convert('RGB')  # raw observation image
-        self.save_raw_image = image.copy()  # get rgb
+        self.save_raw_image = image.copy()  # 缓存原始 RGB 供可视化
 
         x, y = obs["gps"]
         camera_yaw = obs["compass"][0]
@@ -148,7 +149,7 @@ class DialogAgent(Agent):
             self.xyz_yaw_pitch_to_tf_matrix(camera_position, camera_yaw, np.deg2rad(30)) @ self.get_axis_align_matrix()
         )  # get transformation from camera to agent
 
-        # if last action is look down, save the newest look down image for later pixel selection
+        # 若上一步是下视动作，记录下视帧；否则按配置缩放并存入历史序列
         if self.last_action == 5:
             self.look_down_image = image
             self.save_raw_image = self.look_down_image.copy()
@@ -159,11 +160,12 @@ class DialogAgent(Agent):
 
     def convert_output(self, env, llm_outputs: str):
         if '<talk>' in llm_outputs:
+            # 解析到对话指令时，直接返回“提问”动作
             self.question = llm_outputs.replace('<talk>', '')
             return 6
         else:
             if bool(re.search(r'\d', llm_outputs)):  # output pixel goal
-                # get pixel goal
+                # 模型输出包含数字，视为像素坐标目标
                 self.forward_action = 0
                 coord = [int(c) for c in re.findall(r'\d+', llm_outputs)]
                 print('coords:', coord)
@@ -173,7 +175,7 @@ class DialogAgent(Agent):
                     print(f"Invalid pixel goal: len(coor)!=2: {e}")
                     return 0
 
-                # trans pixel goal to global goal
+                # 像素→深度→相机坐标→世界坐标，再检查可行性
                 try:
                     self.goal = self.pixel_to_gps(
                         pixel_goal, self.depth / 1000, self.intrinsic_matrix, self.tf_camera_to_episodic
@@ -190,7 +192,7 @@ class DialogAgent(Agent):
                 x, y, r = pixel_goal[0], pixel_goal[1], 2
                 draw.ellipse([(x - r, y - r), (x + r, y + r)], fill=(255, 0, 0))
 
-                # look down --> horizontal
+                # 先下视，再恢复水平，以便路径规划
                 env.step(4)
                 env.step(4)
 
@@ -205,16 +207,19 @@ class DialogAgent(Agent):
                     return 2
                 print('predicted goal', pixel_goal, self.goal, flush=True)
             else:
+                # 没有像素坐标则解析离散动作序列
                 self.action_seq = self.parse_actions(llm_outputs)
                 print('actions', self.action_seq, flush=True)
 
     def inference(self, obs, info):
         if self.last_action == 6:
+            # 刚完成一次对话，将问答加入历史
             self.dialogs.append({'role': 'navigator', 'message': self.question, 'true_idx': self.step_id})
             self.dialogs.append({'role': 'oracle', 'message': obs['npc_answer'], 'true_idx': self.step_id})
             self.messages.append({'role': 'assistant', 'content': [{'type': 'text', 'text': self.last_llm_outputs}]})
             self.messages.append({'role': 'user', 'content': [{'type': 'text', 'text': obs['npc_answer']}]})
         elif self.last_action == 5:
+            # 刚看过下视图，将该帧拼进输入图像
             sources = [{"from": "human", "value": ""}, {"from": "gpt", "value": ""}]
             self.input_images += [self.look_down_image]
             self.messages.append({'role': 'assistant', 'content': [{'type': 'text', 'text': self.last_llm_outputs}]})
@@ -228,6 +233,7 @@ class DialogAgent(Agent):
             else:
                 history_id = np.unique(np.linspace(0, self.step_id - 1, self.num_history, dtype=np.int32)).tolist()
                 # add dialod history
+                # 将对话所在步数也加入历史，以便模板插入对应文本
                 dialogs_idx = np.sort(list(set([i['true_idx'] for i in self.dialogs]))).tolist()
                 history_id = np.sort(np.unique(np.concatenate([history_id, dialogs_idx]).astype(np.int32))).tolist()
                 placeholder = [''] * (len(history_id) + 1)
@@ -238,7 +244,7 @@ class DialogAgent(Agent):
                         if dialog['true_idx'] == n:
                             output += f"<|{dialog['role']}|>{dialog['message']}"
                     placeholder[pos + 1] = "<|dialog_start|>" + output + "<|dialog_end|>"
-                # add image history
+                # 拼接历史图像占位符，并附加下视帧占位
                 placeholder = (DEFAULT_IMAGE_TOKEN + '\n').join(placeholder)
                 sources[0]["value"] += f' These are your historical observations: {placeholder}.'
                 if self.append_look_down:
@@ -260,6 +266,7 @@ class DialogAgent(Agent):
 
         if self.last_action != 6:
             # prompt text
+            # 用连接词随机起句，插入图像占位后交给模板
             prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
             sources[0]["value"] += f" {prompt}."
             prompt_instruction = copy.deepcopy(sources[0]["value"])
@@ -276,6 +283,7 @@ class DialogAgent(Agent):
 
             self.messages.append({'role': 'user', 'content': content})
         # inference
+        # 走 chat template → 多模态编码 → 生成 → 解码
         text = self.processor.apply_chat_template(self.messages, tokenize=False, add_generation_prompt=True)
         print('step_id', self.step_id, ' ', text)
         inputs = self.processor(text=[text], images=self.input_images, return_tensors="pt").to(self.model.device)
@@ -292,7 +300,7 @@ class DialogAgent(Agent):
     def step(self, obs: Dict[str, Any], env, info):
         print(f'{self.agent_config.model_name} Agent step')
         start = time.time()
-        # convert obs to model input
+        # 将环境观测转换为模型输入并生成动作
         self.step_id = info['step']
         obs = self.convert_input(obs, info)
         if len(self.action_seq) == 0 and self.goal is None:
@@ -306,8 +314,10 @@ class DialogAgent(Agent):
 
         if action is None:
             if len(self.action_seq) != 0:
+                # 逐步消费模型解析出的动作序列
                 action = self.action_seq.pop(0)
             elif self.goal is not None:
+                # 已有全局目标时交给最短路规划器
                 action = self.agent.get_next_action(self.goal)
                 action = action.detach().cpu().numpy()[0] if isinstance(action, torch.Tensor) else action
                 action = action[0] if hasattr(action, "__len__") else action
@@ -315,6 +325,7 @@ class DialogAgent(Agent):
                 self.forward_action += 1
                 print('forward_action', self.forward_action, flush=True)
                 if self.forward_action > 8:
+                    # 避免在同一目标上停滞太久
                     self.goal = None
                     self.messages = []
                     self.forward_action = 0
@@ -338,6 +349,7 @@ class DialogAgent(Agent):
         return action
 
     def reset(self, env):
+        # 任务重置：初始化内参、规划器、位姿与缓存
         self.intrinsic_matrix = self.get_intrinsic_matrix(self.sim_sensors_config.rgb_sensor)
         self.agent = ShortestPathFollower(env._env.sim, 0.25, False)
 

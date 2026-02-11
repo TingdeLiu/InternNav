@@ -18,7 +18,7 @@ deepspeed=scripts/train/qwenvl_train/zero2.json
 # Model configuration
 # Supported variants: Qwen/Qwen3-VL-4B-Instruct, Qwen/Qwen3-VL-8B-Instruct, Qwen/Qwen3-VL-32B-Instruct
 # Note: MoE variants (e.g. Qwen3-VL-30B-A3B) require Qwen3VLMoeForConditionalGeneration; not yet supported.
-llm=Qwen/Qwen3-VL-7B-Instruct
+llm=Qwen/Qwen3-VL-8B-Instruct
 
 # Training hyperparameters
 lr=2e-5

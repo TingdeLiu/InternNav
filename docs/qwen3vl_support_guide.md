@@ -96,7 +96,7 @@ srun -p <YOUR_PARTITION_NAME> \
 ```python
 model_settings={
     "mode": "system2",
-    "model_path": "Qwen/Qwen3-VL-7B-Instruct",  # 或本地路径
+    "model_path": "Qwen/Qwen3-VL-8B-Instruct",  # 或本地路径
     ...
 }
 ```
@@ -130,7 +130,7 @@ bash scripts/train/qwenvl_train/train_system2_qwen3vl.sh
 
 | 参数 | 值 | 说明 |
 |------|----|------|
-| `llm` | `Qwen/Qwen3-VL-7B-Instruct` | 基础模型，可替换为其他尺寸 |
+| `llm` | `Qwen/Qwen3-VL-8B-Instruct` | 基础模型，可替换为其他尺寸 |
 | `data_flatten` | `False` | Qwen3-VL 暂不支持 varlen flash-attn patch |
 | `system1` | `none` | S2 单独训练，不含 S1 组件 |
 | `run_name` | `InternVLA-N1-System2-Qwen3VL` | checkpoint 保存目录名 |
@@ -224,7 +224,7 @@ mode: dual_system
 因此以下路径均会正确识别为 Qwen3-VL：
 
 ```
-Qwen/Qwen3-VL-7B-Instruct
+Qwen/Qwen3-VL-8B-Instruct
 checkpoints/InternVLA-N1-System2-Qwen3VL
 checkpoints/InternVLA-N1-Qwen3VL
 /mnt/data/models/qwen3-vl-finetune

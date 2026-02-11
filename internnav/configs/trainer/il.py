@@ -35,3 +35,5 @@ class IlCfg(BaseModel, extra='allow'):
     use_discrete_dataset: Optional[bool] = None
     loss: Optional[Loss] = None
     report_to: Optional[str] = None
+    wandb_project: Optional[str] = None
+    wandb_run_name: Optional[str] = None

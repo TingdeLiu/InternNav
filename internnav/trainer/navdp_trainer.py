@@ -89,9 +89,11 @@ class NavDPTrainer(BaseTrainer):
 
         ng_action_loss = (pred_ng - noise[0]).square().mean()
         mg_action_loss = (pred_mg - noise[1]).square().mean()
+        # aux_pred now contains [pointgoal_aux_pred, imagegoal_aux_pred, pixelgoal_aux_pred]
         aux_loss = (
-            0.5 * (inputs_on_device["batch_pg"] - aux_pred[0]).square().mean()
-            + 0.5 * (inputs_on_device["batch_pg"] - aux_pred[1]).square().mean()
+            (1.0 / 3.0) * (inputs_on_device["batch_pg"] - aux_pred[0]).square().mean()
+            + (1.0 / 3.0) * (inputs_on_device["batch_pg"] - aux_pred[1]).square().mean()
+            + (1.0 / 3.0) * (inputs_on_device["batch_pg"] - aux_pred[2]).square().mean()
         )
         action_loss = 0.5 * mg_action_loss + 0.5 * ng_action_loss
         critic_loss = (critic_pred - batch_label_critic).square().mean() + (

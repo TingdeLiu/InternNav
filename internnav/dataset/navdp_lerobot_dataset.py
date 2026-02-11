@@ -69,37 +69,54 @@ class NavDP_Base_Datset(Dataset):
         self._last_time = None
 
         if preload is False:
-            for group_dir in self.dataset_dirs:  # gibson_zed, 3dfront ...
-                all_scene_dirs = np.array([p for p in os.listdir(os.path.join(root_dirs, group_dir))])
+            # InternData-N1 新格式: <scene_datasets>/<scene>/data/chunk-000/episode_*.parquet
+            for scene_dataset_dir in self.dataset_dirs:  # matterport3d_d435i, gibson_zed, etc.
+                scene_dataset_path = os.path.join(root_dirs, scene_dataset_dir)
+                if not os.path.isdir(scene_dataset_path):
+                    continue
+                    
+                all_scene_dirs = np.array([p for p in os.listdir(scene_dataset_path)])
                 select_scene_dirs = all_scene_dirs[
                     np.arange(0, all_scene_dirs.shape[0], 1 / self.scene_scale_size).astype(np.int32)
                 ]
-                for scene_dir in select_scene_dirs:
-                    all_traj_dirs = np.array([p for p in os.listdir(os.path.join(root_dirs, group_dir, scene_dir))])
-                    select_traj_dirs = all_traj_dirs[
-                        np.arange(0, all_traj_dirs.shape[0], 1 / self.trajectory_data_scale).astype(np.int32)
-                    ]
-                    for traj_dir in tqdm(select_traj_dirs):
-                        entire_task_dir = os.path.join(root_dirs, group_dir, scene_dir, traj_dir)
-                        rgb_dir = os.path.join(entire_task_dir, "videos/chunk-000/observation.images.rgb/")
-                        depth_dir = os.path.join(entire_task_dir, "videos/chunk-000/observation.images.depth/")
-                        data_path = os.path.join(
-                            entire_task_dir, 'data/chunk-000/episode_000000.parquet'
-                        )  # intrinsic, extrinsic, cam_traj, path
-                        afford_path = os.path.join(entire_task_dir, 'data/chunk-000/path.ply')
-                        rgbs_length = len([p for p in os.listdir(rgb_dir)])
-                        depths_length = len([p for p in os.listdir(depth_dir)])
-
-                        rgbs_path = []
-                        depths_path = []
-                        if depths_length != rgbs_length:
+                
+                for scene_dir in tqdm(select_scene_dirs, desc=f"Processing {scene_dataset_dir}"):
+                    scene_path = os.path.join(scene_dataset_path, scene_dir)
+                    data_dir = os.path.join(scene_path, 'data/chunk-000')
+                    rgb_dir = os.path.join(scene_path, "videos/chunk-000/observation.images.rgb/")
+                    depth_dir = os.path.join(scene_path, "videos/chunk-000/observation.images.depth/")
+                    
+                    # 检查目录是否存在
+                    if not os.path.exists(data_dir) or not os.path.exists(rgb_dir) or not os.path.exists(depth_dir):
+                        continue
+                    
+                    # 获取所有 episode parquet 文件
+                    all_episodes = sorted([f for f in os.listdir(data_dir) if f.startswith('episode_') and f.endswith('.parquet')])
+                    select_indices = np.arange(0, len(all_episodes), 1 / self.trajectory_data_scale).astype(np.int32)
+                    select_episodes = [all_episodes[i] for i in select_indices]
+                    
+                    for episode_file in select_episodes:
+                        episode_id = episode_file.replace('episode_', '').replace('.parquet', '')
+                        data_path = os.path.join(data_dir, episode_file)
+                        
+                        # 新格式的图像文件命名: episode_<id>_<frame>.jpg
+                        rgb_files = sorted([f for f in os.listdir(rgb_dir) if f.startswith(f'episode_{episode_id}_') and f.endswith('.jpg')])
+                        depth_files = sorted([f for f in os.listdir(depth_dir) if f.startswith(f'episode_{episode_id}_') and f.endswith('.png')])
+                        
+                        if len(rgb_files) != len(depth_files) or len(rgb_files) == 0:
                             continue
-                        for i in range(rgbs_length):
-                            rgbs_path.append(os.path.join(rgb_dir, "%d.jpg" % i))
-                            depths_path.append(os.path.join(depth_dir, "%d.png" % i))
-                        if os.path.exists(data_path) is False:
-                            continue
-                        self.trajectory_dirs.append(entire_task_dir)
+                        
+                        rgbs_path = [os.path.join(rgb_dir, f) for f in rgb_files]
+                        depths_path = [os.path.join(depth_dir, f) for f in depth_files]
+                        
+                        # afford_path 在新格式中可能在 meta 目录，如果不存在则设为 None
+                        afford_path = os.path.join(scene_path, 'meta/pointcloud.ply')
+                        if not os.path.exists(afford_path):
+                            afford_path = os.path.join(data_dir, 'path.ply')  # 兼容旧格式
+                            if not os.path.exists(afford_path):
+                                afford_path = None  # 新格式可能没有点云文件
+                        
+                        self.trajectory_dirs.append(scene_path)
                         self.trajectory_data_dir.append(data_path)
                         self.trajectory_rgb_path.append(rgbs_path)
                         self.trajectory_depth_path.append(depths_path)
@@ -112,8 +129,10 @@ class NavDP_Base_Datset(Dataset):
                 'trajectory_depth_path': self.trajectory_depth_path,
                 'trajectory_afford_path': self.trajectory_afford_path,
             }
-            with open(preload_path, 'w') as f:
-                json.dump(save_dict, f, indent=4)
+            # 只有当 preload_path 是有效路径时才保存
+            if preload_path and isinstance(preload_path, str):
+                with open(preload_path, 'w') as f:
+                    json.dump(save_dict, f, indent=4)
         else:
             load_dict = json.load(open(preload_path, 'r'))
             self.trajectory_dirs = load_dict['trajectory_dirs'] * 50
@@ -173,42 +192,83 @@ class NavDP_Base_Datset(Dataset):
         if not os.path.isfile(self.trajectory_data_dir[index]):
             raise FileNotFoundError(self.trajectory_data_dir[index])
         df = pd.read_parquet(self.trajectory_data_dir[index])
-        camera_intrinsic = np.vstack(np.array(df['observation.camera_intrinsic'].tolist()[0])).reshape(3, 3)
-        camera_extrinsic = np.vstack(np.array(df['observation.camera_extrinsic'].tolist()[0])).reshape(4, 4)
-        trajectory_length = len(df['action'].tolist())
-        camera_trajectory = np.array([np.stack(frame) for frame in df['action']], dtype=np.float64)
+        
+        # 新格式：字段是 list 类型，需要转换
+        # camera_intrinsic: 第一行包含 9 个元素 (3x3 矩阵)
+        intrinsic_data = df['observation.camera_intrinsic'].iloc[0]
+        camera_intrinsic = np.array(intrinsic_data).reshape(3, 3)
+        
+        # camera_extrinsic: 第一行包含 16 个元素 (4x4 矩阵) - base extrinsic
+        extrinsic_data = df['observation.camera_extrinsic'].iloc[0]
+        camera_extrinsic = np.array(extrinsic_data).reshape(4, 4)
+        
+        # action: 每行包含 16 个元素，表示该帧的相机外参 (4x4 矩阵)
+        trajectory_length = len(df)
+        camera_trajectory = np.array([np.array(row).reshape(4, 4) for row in df['action']], dtype=np.float64)
+        
         return camera_intrinsic, camera_extrinsic, camera_trajectory, trajectory_length
 
     def process_path_points(self, index):
-        trajectory_pcd = self.load_pointcloud(self.trajectory_afford_path[index])
-        trajectory_color = np.array(trajectory_pcd.colors)
-        color_distance = np.abs(trajectory_color - np.array([0, 0, 0])).sum(
-            axis=-1
-        )  # sometimes, the path are saved as black points
-        select_index = np.where(color_distance < 0.05)[0]
-        trajectory_path = o3d.geometry.PointCloud()
-        trajectory_path.points = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.points)[select_index])
-        trajectory_path.colors = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.colors)[select_index])
-        return np.array(trajectory_path.points), trajectory_path
+        # 检查点云文件是否存在（新格式可能没有点云文件）
+        if self.trajectory_afford_path[index] is None or not os.path.exists(self.trajectory_afford_path[index]):
+            return np.array([]).reshape(0, 3), o3d.geometry.PointCloud()
+        
+        try:
+            trajectory_pcd = self.load_pointcloud(self.trajectory_afford_path[index])
+            trajectory_color = np.array(trajectory_pcd.colors)
+            
+            # 如果点云没有颜色信息，返回所有点
+            if len(trajectory_color) == 0:
+                return np.array(trajectory_pcd.points), trajectory_pcd
+            
+            color_distance = np.abs(trajectory_color - np.array([0, 0, 0])).sum(
+                axis=-1
+            )  # sometimes, the path are saved as black points
+            select_index = np.where(color_distance < 0.05)[0]
+            
+            # 如果没有找到黑色点，尝试返回所有点
+            if len(select_index) == 0:
+                return np.array(trajectory_pcd.points), trajectory_pcd
+            
+            trajectory_path = o3d.geometry.PointCloud()
+            trajectory_path.points = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.points)[select_index])
+            trajectory_path.colors = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.colors)[select_index])
+            return np.array(trajectory_path.points), trajectory_path
+        except Exception as e:
+            # 如果加载失败，返回空数组
+            return np.array([]).reshape(0, 3), o3d.geometry.PointCloud()
 
     def process_obstacle_points(self, index, path_points):
-        trajectory_pcd = self.load_pointcloud(self.trajectory_afford_path[index])
-        trajectory_color = np.array(trajectory_pcd.colors)
-        trajectory_points = np.array(trajectory_pcd.points)
-        color_distance = np.abs(trajectory_color - np.array([0, 0, 0.5])).sum(axis=-1)  # the obstacles are save in blue
-        path_lower_bound = path_points.min(axis=0)
-        path_upper_bound = path_points.max(axis=0)
-        condition_x = (trajectory_points[:, 0] >= path_lower_bound[0] - 2.0) & (
-            trajectory_points[:, 0] <= path_upper_bound[0] + 2.0
-        )
-        condition_y = (trajectory_points[:, 1] >= path_lower_bound[1] - 2.0) & (
-            trajectory_points[:, 1] <= path_upper_bound[1] + 2.0
-        )
-        select_index = np.where((color_distance < 0.05) & condition_x & condition_y)[0]
-        trajectory_obstacle = o3d.geometry.PointCloud()
-        trajectory_obstacle.points = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.points)[select_index])
-        trajectory_obstacle.colors = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.colors)[select_index])
-        return np.array(trajectory_obstacle.points), trajectory_obstacle
+        # 如果 path_points 为空或点云文件不存在，返回空数组（新格式可能没有障碍物点云）
+        if len(path_points) == 0 or self.trajectory_afford_path[index] is None or not os.path.exists(self.trajectory_afford_path[index]):
+            return np.array([]).reshape(0, 3), o3d.geometry.PointCloud()
+        
+        try:
+            trajectory_pcd = self.load_pointcloud(self.trajectory_afford_path[index])
+            trajectory_color = np.array(trajectory_pcd.colors)
+            trajectory_points = np.array(trajectory_pcd.points)
+            
+            # 如果没有颜色信息，返回空数组
+            if len(trajectory_color) == 0:
+                return np.array([]).reshape(0, 3), o3d.geometry.PointCloud()
+            
+            color_distance = np.abs(trajectory_color - np.array([0, 0, 0.5])).sum(axis=-1)  # the obstacles are save in blue
+            path_lower_bound = path_points.min(axis=0)
+            path_upper_bound = path_points.max(axis=0)
+            condition_x = (trajectory_points[:, 0] >= path_lower_bound[0] - 2.0) & (
+                trajectory_points[:, 0] <= path_upper_bound[0] + 2.0
+            )
+            condition_y = (trajectory_points[:, 1] >= path_lower_bound[1] - 2.0) & (
+                trajectory_points[:, 1] <= path_upper_bound[1] + 2.0
+            )
+            select_index = np.where((color_distance < 0.05) & condition_x & condition_y)[0]
+            trajectory_obstacle = o3d.geometry.PointCloud()
+            trajectory_obstacle.points = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.points)[select_index])
+            trajectory_obstacle.colors = o3d.utility.Vector3dVector(np.asarray(trajectory_pcd.colors)[select_index])
+            return np.array(trajectory_obstacle.points), trajectory_obstacle
+        except Exception as e:
+            # 如果加载失败，返回空数组
+            return np.array([]).reshape(0, 3), o3d.geometry.PointCloud()
 
     def process_memory(self, rgb_paths, depth_paths, start_step, memory_digit=1):
         memory_index = np.arange(start_step - (self.memory_size - 1) * memory_digit, start_step + 1, memory_digit)

@@ -14,6 +14,7 @@ class ExpCfg(BaseModel, extra='allow'):
     torch_gpu_ids: Optional[List[int]] = None
     checkpoint_folder: Optional[str] = None
     log_dir: Optional[str] = None
+    wandb_dir: Optional[str] = None
     seed: Optional[int] = None
     eval: Optional[EvalCfg] = None
     il: Optional[IlCfg] = None

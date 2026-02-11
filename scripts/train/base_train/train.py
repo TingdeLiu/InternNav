@@ -60,12 +60,17 @@ class CheckpointFormatCallback(TrainerCallback):
 
 
 def _make_dir(config):
-    config.tensorboard_dir = config.tensorboard_dir % config.name
+    if hasattr(config, 'tensorboard_dir') and config.tensorboard_dir:
+        config.tensorboard_dir = config.tensorboard_dir % config.name
+        if not os.path.exists(config.tensorboard_dir):
+            os.makedirs(config.tensorboard_dir, exist_ok=True)
+    if hasattr(config, 'wandb_dir') and config.wandb_dir:
+        config.wandb_dir = config.wandb_dir % config.name
+        if not os.path.exists(config.wandb_dir):
+            os.makedirs(config.wandb_dir, exist_ok=True)
     config.checkpoint_folder = config.checkpoint_folder % config.name
     config.log_dir = config.log_dir % config.name
     config.output_dir = config.output_dir % config.name
-    if not os.path.exists(config.tensorboard_dir):
-        os.makedirs(config.tensorboard_dir, exist_ok=True)
     if not os.path.exists(config.checkpoint_folder):
         os.makedirs(config.checkpoint_folder, exist_ok=True)
     if not os.path.exists(config.log_dir):
@@ -138,11 +143,8 @@ def main(config, model_class, model_config_class):
                     print(f"Buffer {name} is on wrong device {buffer.device}, should be moved to {device}")
                     buffer.data = buffer.data.to(device)
 
-            # If distributed training, wrap the model with DDP
-            if world_size > 1:
-                model = torch.nn.parallel.DistributedDataParallel(
-                    model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
-                )
+            # Note: Do NOT manually wrap with DDP here - let HuggingFace Trainer handle it
+            # The Trainer will use ddp_find_unused_parameters from TrainingArguments
         # ------------ load logger ------------
         train_logger_filename = os.path.join(config.log_dir, 'train.log')
         if dist.is_initialized() and dist.get_rank() == 0:
@@ -217,6 +219,23 @@ def main(config, model_class, model_config_class):
             policy_trainer = NavDPTrainer
             train_dataset = train_dataset_data
             collate_fn = navdp_collate_fn
+
+        # ------------ Initialize WandB (only on main process) ------------
+        if config.il.report_to == 'wandb':
+            import wandb
+            rank = int(os.getenv('RANK', '0'))
+            if rank == 0:
+                wandb_project = getattr(config.il, 'wandb_project', None) or 'InternNav'
+                wandb_run_name = getattr(config.il, 'wandb_run_name', None) or config.name
+                wandb_dir = getattr(config, 'wandb_dir', None) or config.log_dir
+                wandb.init(
+                    project=wandb_project,
+                    name=wandb_run_name,
+                    dir=wandb_dir,
+                    config=config.model_dump() if hasattr(config, 'model_dump') else vars(config),
+                    reinit=True,
+                )
+                print(f"WandB initialized: project={wandb_project}, run={wandb_run_name}")
 
         # ------------ training args ------------
         training_args = TrainingArguments(

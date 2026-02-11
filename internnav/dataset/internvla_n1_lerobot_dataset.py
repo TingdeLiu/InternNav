@@ -14,7 +14,11 @@ import transformers
 from decord import VideoReader
 from PIL import Image
 from torch.utils.data import Dataset
-from torchcodec.decoders import VideoDecoder
+# Lazy import: torchcodec is optional, will fallback to decord if unavailable
+try:
+    from torchcodec.decoders import VideoDecoder
+except ImportError:
+    VideoDecoder = None
 from transformers.image_utils import to_numpy_array
 
 from .rope2d import get_rope_index_2, get_rope_index_25

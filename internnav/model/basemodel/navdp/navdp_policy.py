@@ -130,6 +130,7 @@ class NavDPNet(PreTrainedModel):
         self.cond_critic_mask = torch.zeros((self.predict_size, 4 + self.memory_size * 16))
         self.cond_critic_mask[:, 0:4] = float('-inf')
 
+        self.point_aux_head = nn.Linear(self.token_dim, 3)
         self.pixel_aux_head = nn.Linear(self.token_dim, 3)
         self.image_aux_head = nn.Linear(self.token_dim, 3)
 
@@ -203,6 +204,7 @@ class NavDPNet(PreTrainedModel):
         imagegoal_embed = self.image_encoder(goal_image).unsqueeze(1)
         pixelgoal_embed = self.pixel_encoder(goal_pixel).unsqueeze(1)
 
+        pointgoal_aux_pred = self.point_aux_head(pointgoal_embed[:, 0])
         imagegoal_aux_pred = self.image_aux_head(imagegoal_embed[:, 0])
         pixelgoal_aux_pred = self.pixel_aux_head(pixelgoal_embed[:, 0])
 
@@ -219,16 +221,15 @@ class NavDPNet(PreTrainedModel):
         cand_goal_embed = [pointgoal_embed, imagegoal_embed, pixelgoal_embed]
         batch_size = pointgoal_embed.shape[0]
 
-        # Generate deterministic selections for each sample in the batch using vectorized operations
-        batch_indices = torch.arange(batch_size, device=pointgoal_embed.device)
-        pattern_indices = batch_indices % 27  # 3^3 = 27 possible combinations
-        selections_0 = pattern_indices % 3
-        selections_1 = (pattern_indices // 3) % 3
-        selections_2 = (pattern_indices // 9) % 3
+        # Use random sampling to ensure all goal encoders receive gradients
+        # Each sample randomly selects goal types for the 3 goal slots
+        selections_0 = torch.randint(0, 3, (batch_size,), device=pointgoal_embed.device)
+        selections_1 = torch.randint(0, 3, (batch_size,), device=pointgoal_embed.device)
+        selections_2 = torch.randint(0, 3, (batch_size,), device=pointgoal_embed.device)
         goal_embeds = torch.stack(cand_goal_embed, dim=0)  # [3, batch_size, 1, token_dim]
-        selected_goals_0 = goal_embeds[selections_0, torch.arange(batch_size), :, :]  # [batch_size, 1, token_dim]
-        selected_goals_1 = goal_embeds[selections_1, torch.arange(batch_size), :, :]
-        selected_goals_2 = goal_embeds[selections_2, torch.arange(batch_size), :, :]
+        selected_goals_0 = goal_embeds[selections_0, torch.arange(batch_size, device=pointgoal_embed.device), :, :]  # [batch_size, 1, token_dim]
+        selected_goals_1 = goal_embeds[selections_1, torch.arange(batch_size, device=pointgoal_embed.device), :, :]
+        selected_goals_2 = goal_embeds[selections_2, torch.arange(batch_size, device=pointgoal_embed.device), :, :]
         mg_cond_embed_tensor = torch.cat(
             [mg_time_embed, selected_goals_0, selected_goals_1, selected_goals_2, rgbd_embed], dim=1
         )
@@ -267,7 +268,7 @@ class NavDPNet(PreTrainedModel):
             cr_label_pred,
             cr_augment_pred,
             [ng_noise, mg_noise],
-            [imagegoal_aux_pred, pixelgoal_aux_pred],
+            [pointgoal_aux_pred, imagegoal_aux_pred, pixelgoal_aux_pred],
         )
 
     def _get_device(self):

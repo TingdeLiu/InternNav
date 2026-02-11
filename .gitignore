@@ -162,3 +162,5 @@ checkpoints
 internnav/model/basemodel/LongCLIP/
 .gradio/
 result/
+
+CLAUDE.md

@@ -23,8 +23,13 @@ try:
         AutoTokenizer,
         Qwen2_5_VLForConditionalGeneration,
     )
+    try:
+        from transformers import Qwen3VLForConditionalGeneration
+    except ImportError:
+        Qwen3VLForConditionalGeneration = None
 except Exception as e:
     print(f"Warning: ({e}), Habitat Evaluation is not loaded in this runtime. Ignore this if not using Habitat.")
+    Qwen3VLForConditionalGeneration = None
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 
@@ -86,12 +91,22 @@ class DialogAgent(Agent):
         if self.model_args.mode == 'dual_system':
             raise NotImplementedError("Dual System mode is not supported in DialogAgent.")
         elif self.model_args.mode == 'system2':
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": self.device},
-            )
+            if 'qwen3' in self.model_args.model_path.lower():
+                if Qwen3VLForConditionalGeneration is None:
+                    raise ImportError("Qwen3VLForConditionalGeneration not found. Please upgrade transformers: pip install -U transformers")
+                model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": self.device},
+                )
+            else:
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": self.device},
+                )
         else:
             raise ValueError(f"Invalid mode: {self.model_args.mode}")
 

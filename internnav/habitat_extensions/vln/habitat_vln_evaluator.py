@@ -30,6 +30,11 @@ from habitat_baselines.config.default import get_config as get_habitat_config
 from PIL import Image
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+try:
+    from transformers import Qwen3VLForConditionalGeneration
+except ImportError:
+    Qwen3VLForConditionalGeneration = None
+
 from internnav.configs.evaluator import EvalCfg
 from internnav.evaluator import DistributedEvaluator, Evaluator
 from internnav.habitat_extensions.vln.utils import (
@@ -118,12 +123,22 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 device_map={"": device},
             )
         elif self.model_args.mode == 'system2':
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
+            if 'qwen3' in self.model_args.model_path.lower():
+                if Qwen3VLForConditionalGeneration is None:
+                    raise ImportError("Qwen3VLForConditionalGeneration not found. Please upgrade transformers: pip install -U transformers")
+                model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            else:
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
         else:
             raise ValueError(f"Invalid mode: {self.model_args.mode}")
 

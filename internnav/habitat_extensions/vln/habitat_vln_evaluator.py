@@ -116,12 +116,25 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
         device = torch.device(f"cuda:{self.local_rank}")
         if self.model_args.mode == 'dual_system':
-            model = InternVLAN1ForCausalLM.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
+            if 'qwen3' in self.model_args.model_path.lower():
+                from internnav.model.basemodel.internvla_n1.internvla_n1_qwen3 import (
+                    InternVLAN1ForCausalLMQwen3,
+                    InternVLAN1ModelConfigQwen3,
+                )
+                model = InternVLAN1ForCausalLMQwen3.from_pretrained(
+                    self.model_args.model_path,
+                    config=InternVLAN1ModelConfigQwen3.from_pretrained(self.model_args.model_path),
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            else:
+                model = InternVLAN1ForCausalLM.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
         elif self.model_args.mode == 'system2':
             if 'qwen3' in self.model_args.model_path.lower():
                 if Qwen3VLForConditionalGeneration is None:

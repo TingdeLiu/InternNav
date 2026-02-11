@@ -27,7 +27,8 @@ Qwen3-VL 在以下方面有所提升：
 - **DeepStack**：多层 ViT 特征融合，细粒度视觉识别增强
 - **Text-Timestamp Alignment**：视频帧级时间戳对齐，支持事件精确定位
 
-本次改动仅针对 **S2 单独运行模式**（`mode: system2`），双系统联合推理架构（`mode: dual_system`）中 `InternVLAN1ForCausalLM` 的骨干仍为 Qwen2.5-VL，不受影响。
+本次改动同时覆盖 **S2 单独运行模式**（`mode: system2`）与**双系统联合推理**（`mode: dual_system`）。
+双系统 Qwen2.5-VL 路径完全不受影响。
 
 ---
 
@@ -100,6 +101,21 @@ model_settings={
 }
 ```
 
+### 3.4 双系统联合推理（`mode: dual_system`）使用 Qwen3-VL
+
+将 `mode` 改为 `dual_system`，并将 `model_path` 指向含 `qwen3` 字样的 checkpoint：
+
+```python
+model_settings={
+    "mode": "dual_system",
+    "model_path": "checkpoints/InternVLA-N1-Qwen3VL",  # 路径需含 "qwen3"
+    ...
+}
+```
+
+框架会自动加载 `InternVLAN1ForCausalLMQwen3`；路径不含 `qwen3` 时仍加载原有
+`InternVLAN1ForCausalLM`（Qwen2.5-VL 骨干），两者完全独立。
+
 ---
 
 ## 4. 训练
@@ -167,7 +183,7 @@ python scripts/eval/eval.py --config scripts/eval/configs/habitat_s2_qwen3vl_cfg
 
 | 文件 | 改动位置 | 说明 |
 |------|---------|------|
-| `internnav/habitat_extensions/vln/habitat_vln_evaluator.py` | L31–36, L125–140 | 评估器 `system2` 分支增加 Qwen3-VL 加载逻辑 |
+| `internnav/habitat_extensions/vln/habitat_vln_evaluator.py` | L31–36, L118–142 | 评估器 `dual_system` 和 `system2` 分支均增加 Qwen3-VL 加载逻辑 |
 | `internnav/agent/dialog_agent.py` | L21–30, L88–103 | DialogAgent `system2` 分支增加 Qwen3-VL 加载逻辑 |
 | `internnav/trainer/internvla_n1_trainer.py` | L40–43, L165–178 | 训练入口新增 `elif "qwen3"` 分支 |
 
@@ -175,6 +191,7 @@ python scripts/eval/eval.py --config scripts/eval/configs/habitat_s2_qwen3vl_cfg
 
 | 文件 | 说明 |
 |------|------|
+| `internnav/model/basemodel/internvla_n1/internvla_n1_qwen3.py` | Qwen3-VL 双系统模型类（`InternVLAN1ForCausalLMQwen3`） |
 | `scripts/train/qwenvl_train/train_system2_qwen3vl.sh` | Qwen3-VL S2 训练脚本 |
 | `scripts/eval/configs/habitat_s2_qwen3vl_cfg.py` | Qwen3-VL S2 评估配置 |
 | `docs/qwen3vl_support_guide.md` | 本文档 |
@@ -183,7 +200,7 @@ python scripts/eval/eval.py --config scripts/eval/configs/habitat_s2_qwen3vl_cfg
 
 以下文件**不受影响**，Qwen2.5-VL 的全部路径保持原样：
 
-- `internnav/model/basemodel/internvla_n1/internvla_n1.py`（双系统架构）
+- `internnav/model/basemodel/internvla_n1/internvla_n1.py`（Qwen2.5-VL 双系统架构）
 - `internnav/trainer/qwenvl_base.py`（attention patch 工具）
 - `scripts/eval/configs/habitat_s2_cfg.py`（原有 Qwen2.5-VL 评估配置）
 - `scripts/train/qwenvl_train/train_system2.sh`（原有 Qwen2.5-VL 训练脚本）
@@ -195,17 +212,21 @@ python scripts/eval/eval.py --config scripts/eval/configs/habitat_s2_qwen3vl_cfg
 框架通过 `model_path` 字符串自动判断要加载的模型类：
 
 ```
-model_path.lower() 包含 "qwen3"  →  Qwen3VLForConditionalGeneration
-model_path.lower() 包含 "qwen2.5" →  Qwen2_5_VLForConditionalGeneration
-其他                              →  Qwen2VLForConditionalGeneration（兜底）
+mode: system2
+  model_path 含 "qwen3"  →  Qwen3VLForConditionalGeneration
+  其他                   →  Qwen2_5_VLForConditionalGeneration（或 Qwen2VL 兜底）
+
+mode: dual_system
+  model_path 含 "qwen3"  →  InternVLAN1ForCausalLMQwen3   （Qwen3VL 骨干）
+  其他                   →  InternVLAN1ForCausalLM         （Qwen2.5VL 骨干，原有）
 ```
 
 因此以下路径均会正确识别为 Qwen3-VL：
 
 ```
 Qwen/Qwen3-VL-7B-Instruct
-Qwen/Qwen3-VL-8B-Instruct
 checkpoints/InternVLA-N1-System2-Qwen3VL
+checkpoints/InternVLA-N1-Qwen3VL
 /mnt/data/models/qwen3-vl-finetune
 ```
 
@@ -223,39 +244,28 @@ Please upgrade transformers: pip install -U transformers
 | 特性 | Qwen2.5-VL | Qwen3-VL |
 |------|-----------|---------|
 | 主模型类 | `Qwen2_5_VLForConditionalGeneration` | `Qwen3VLForConditionalGeneration` |
-| Config 类 | `Qwen2_5_VLConfig` | `Qwen3VLConfig` |
-| position_ids 维度 | 2D `(B, seq_len)` | 3D `(3, B, seq_len)`，MRoPE |
+| 双系统模型类 | `InternVLAN1ForCausalLM` | `InternVLAN1ForCausalLMQwen3` |
+| Config 类 | `Qwen2_5_VLConfig` / `InternVLAN1ModelConfig` | `Qwen3VLConfig` / `InternVLAN1ModelConfigQwen3` |
+| position_ids 维度 | 2D `(B, seq_len)` → 框架内扩为 3D | 3D `(3, B, seq_len)`，MRoPE |
 | 视频时间戳参数 | 无 | `second_per_grid_ts`（帧级时间戳） |
-| MoE 变体 | 无 | `Qwen3VLMoeForConditionalGeneration` |
+| MoE 变体 | 无 | `Qwen3VLMoeForConditionalGeneration`（暂不支持） |
 | 特殊 token ID | `image=151655, video=151656` | 相同 |
 | Processor API | `AutoProcessor` | `AutoProcessor`（兼容） |
 | 生成 API | `model.generate()` | `model.generate()`（兼容） |
 
-对于 **S2 单独推理**，两者的 `model.generate()` 接口完全一致，框架层无需感知 position_ids 的变化（由模型内部处理）。
+对于 **S2 单独推理**与**双系统推理**，两者的 `model.generate()` 接口完全一致，框架层无需感知 position_ids 的变化（由模型内部处理）。
 
 ---
 
 ## 9. 当前限制
 
-### 9.1 双系统联合推理（`mode: dual_system`）不支持
-
-`InternVLAN1ForCausalLM` 通过多重继承直接基于 `Qwen2_5_VLForConditionalGeneration`，将 Qwen3-VL 替换为双系统骨干需要重新实现：
-
-```python
-# 当前架构（未变）
-class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1MetaForCausalLM):
-    ...
-```
-
-若需支持，需参考 `internvla_n1.py` 新建 `InternVLAN1ForCausalLMQwen3` 类并继承 `Qwen3VLForConditionalGeneration`。
-
-### 9.2 `data_flatten` 训练模式不支持
+### 9.1 `data_flatten` 训练模式不支持
 
 `qwenvl_base.py` 中的 `replace_qwen2_vl_attention_class()` 仅 patch 了 Qwen2VL 和 Qwen2.5VL 的 flash-attn 路径。Qwen3-VL 训练时需保持 `data_flatten=False`（已在训练脚本中设置）。
 
-### 9.3 MoE 变体不支持
+### 9.2 MoE 变体不支持
 
-`Qwen3-VL-30B-A3B` 和 `Qwen3-VL-235B-A22B` 使用 `Qwen3VLMoeForConditionalGeneration`，当前检测逻辑统一走 `Qwen3VLForConditionalGeneration`，加载会失败。如需支持 MoE 变体，需在检测逻辑中额外判断路径是否含 `"moe"` 或 `"-a"` 标识。
+`Qwen3-VL-30B-A3B` 和 `Qwen3-VL-235B-A22B` 使用 `Qwen3VLMoeForConditionalGeneration`，当前检测逻辑统一走 `Qwen3VLForConditionalGeneration`（S2 模式）或 `InternVLAN1ForCausalLMQwen3`（dual_system 模式），加载 MoE checkpoint 会失败。如需支持 MoE 变体，需在检测逻辑中额外判断路径是否含 `"moe"` 或 `"-a"` 标识。
 
 ---
 
@@ -267,8 +277,10 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
 
 ```python
 print(type(self.model).__name__)
-# Qwen3-VL → Qwen3VLForConditionalGeneration
-# Qwen2.5-VL → Qwen2_5_VLForConditionalGeneration
+# system2 Qwen3-VL   → Qwen3VLForConditionalGeneration
+# system2 Qwen2.5-VL → Qwen2_5_VLForConditionalGeneration
+# dual_system Qwen3  → InternVLAN1ForCausalLMQwen3
+# dual_system Q2.5   → InternVLAN1ForCausalLM
 ```
 
 ---
@@ -288,3 +300,9 @@ print(type(self.model).__name__)
 **Q: `max_new_tokens` 设置多少合适？**
 
 与 Qwen2.5-VL 相同，推荐 `1024`。若仅输出坐标或离散动作，`256` 即可，速度更快。
+
+---
+
+**Q: 双系统模式下 `InternVLAN1ForCausalLMQwen3` 与原版有什么本质区别？**
+
+仅继承链不同：`InternVLAN1ForCausalLMQwen3` 继承自 `Qwen3VLForConditionalGeneration`，`InternVLAN1ForCausalLM` 继承自 `Qwen2_5_VLForConditionalGeneration`。两者共享同一套 `InternVLAN1MetaForCausalLM` mixin（`generate_latents`、`generate_traj`、`get_sigmas` 等），S1 扩散头逻辑完全一致。

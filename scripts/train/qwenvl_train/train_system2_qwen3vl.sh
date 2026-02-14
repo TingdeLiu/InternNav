@@ -22,13 +22,13 @@ llm=Qwen/Qwen3-VL-8B-Instruct
 
 # Training hyperparameters
 lr=2e-5
-vision_tower_lr=5e-6
+vision_tower_lr=5e-6s
 batch_size=2
 grad_accum_steps=1
 max_pixels=313600
 min_pixels=3136
 
-# Dataset configuration (replace with public dataset names)
+# Dataset configuration (replace with public dataset names) 位于VLN_CE
 vln_datasets=r2r_125cm_0_30,r2r_125cm_0_45,r2r_60cm_15_15,r2r_60cm_30_30,rxr_125cm_0_30,rxr_125cm_0_45,rxr_60cm_15_15,rxr_60cm_30_30
 
 # Output configuration

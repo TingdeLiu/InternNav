@@ -1,23 +1,46 @@
 # QwenVL 模型训练指南
 
-本文档介绍如何使用 Qwen2.5-VL 和 Qwen3-VL 系列模型（2B/3B、4B、7B/8B）在 InternNav 框架下训练 InternVLA-N1 System-2。
+本文档介绍如何使用 Qwen2.5-VL 和 Qwen3-VL 系列模型（2B、3B、4B、8B）在 InternNav 框架下训练 InternVLA-N1 System-2。
 
 ## 目录
 
-- [模型规格概览](#模型规格概览)
-- [环境依赖](#环境依赖)
-- [训练模式说明](#训练模式说明)
-- [快速开始：本地多 GPU 训练](#快速开始本地多-gpu-训练)
-- [集群训练（SLURM）](#集群训练slurm)
-- [按模型大小配置](#按模型大小配置)
-  - [Qwen2.5-VL-3B（约 2B 级别）](#qwen25-vl-3b约-2b-级别)
-  - [Qwen3-VL-4B](#qwen3-vl-4b)
-  - [Qwen3-VL-8B / Qwen2.5-VL-7B](#qwen3-vl-8b--qwen25-vl-7b)
-- [双系统联合训练](#双系统联合训练)
-- [训练参数详解](#训练参数详解)
-- [DeepSpeed 配置选择](#deepspeed-配置选择)
-- [显存需求参考](#显存需求参考)
-- [常见问题](#常见问题)
+- [QwenVL 模型训练指南](#qwenvl-模型训练指南)
+  - [目录](#目录)
+  - [模型规格概览](#模型规格概览)
+  - [环境依赖](#环境依赖)
+  - [训练模式说明](#训练模式说明)
+  - [快速开始：本地多 GPU 训练](#快速开始本地多-gpu-训练)
+    - [使用默认 GPU（GPU 6、7）](#使用默认-gpugpu-67)
+    - [指定 GPU](#指定-gpu)
+    - [修改模型大小](#修改模型大小)
+  - [集群训练（SLURM）](#集群训练slurm)
+    - [Qwen2.5-VL（System-2 训练）](#qwen25-vlsystem-2-训练)
+    - [Qwen3-VL（System-2 训练）](#qwen3-vlsystem-2-训练)
+  - [按模型大小配置](#按模型大小配置)
+    - [Qwen3-VL-2B](#qwen3-vl-2b)
+    - [Qwen2.5-VL-3B（约 3B 级别）](#qwen25-vl-3b约-3b-级别)
+    - [Qwen3-VL-4B](#qwen3-vl-4b)
+    - [Qwen3-VL-8B / Qwen2.5-VL-7B](#qwen3-vl-8b--qwen25-vl-7b)
+      - [Qwen3-VL-8B（使用现有脚本，默认配置）](#qwen3-vl-8b使用现有脚本默认配置)
+      - [Qwen2.5-VL-7B（使用现有脚本，默认配置）](#qwen25-vl-7b使用现有脚本默认配置)
+  - [双系统联合训练](#双系统联合训练)
+    - [前提条件](#前提条件)
+    - [启动双系统训练](#启动双系统训练)
+  - [训练参数详解](#训练参数详解)
+    - [模型参数（ModelArguments）](#模型参数modelarguments)
+    - [数据参数（DataArguments）](#数据参数dataarguments)
+    - [训练参数（TrainingArguments）](#训练参数trainingarguments)
+    - [数据集标识符](#数据集标识符)
+  - [DeepSpeed 配置选择](#deepspeed-配置选择)
+  - [显存需求参考](#显存需求参考)
+  - [常见问题](#常见问题)
+    - [Q: Qwen3-VL 训练时报错 `data_flatten` 相关错误？](#q-qwen3-vl-训练时报错-data_flatten-相关错误)
+    - [Q: 如何降低显存占用？](#q-如何降低显存占用)
+    - [Q: 训练后如何评估？](#q-训练后如何评估)
+    - [Q: 如何使用自定义本地模型路径？](#q-如何使用自定义本地模型路径)
+    - [Q: Wandb 报告失败怎么办？](#q-wandb-报告失败怎么办)
+    - [Q: 训练中断如何续训？](#q-训练中断如何续训)
+  - [相关文档](#相关文档)
 
 ---
 
@@ -27,6 +50,7 @@ InternNav 支持以下 QwenVL 模型作为 System-2 语言推理主干：
 
 | 系列 | 模型 | 参数量 | 推荐用途 |
 |------|------|--------|---------|
+| Qwen3-VL | `Qwen/Qwen3-VL-2B-Instruct` | ~2B | 资源极限受限、边缘设备、快速实验 |
 | Qwen2.5-VL | `Qwen/Qwen2.5-VL-3B-Instruct` | ~3B | 资源受限环境、快速实验 |
 | Qwen2.5-VL | `Qwen/Qwen2.5-VL-7B-Instruct` | ~7B | 标准训练（推荐） |
 | Qwen3-VL | `Qwen/Qwen3-VL-4B-Instruct` | ~4B | 轻量级 Qwen3 架构 |
@@ -145,7 +169,71 @@ sbatch scripts/train/qwenvl_train/train_system2_qwen3vl.sh
 
 ## 按模型大小配置
 
-### Qwen2.5-VL-3B（约 2B 级别）
+### Qwen3-VL-2B
+
+**推荐场景：** 显存极度受限（单卡 24GB）、边缘部署验证、消融实验
+
+> **重要：** Qwen3-VL 必须设置 `data_flatten False`，不支持 flash attention 序列打平优化。
+
+本地单卡或 2 卡启动：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0         # 单卡
+# export CUDA_VISIBLE_DEVICES=0,1    # 双卡
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+
+torchrun --standalone --nproc_per_node=${NUM_GPUS} \
+    internnav/trainer/internvla_n1_trainer.py \
+    --deepspeed scripts/train/qwenvl_train/zero2.json \
+    --model_name_or_path Qwen/Qwen3-VL-2B-Instruct \
+    --vln_dataset_use r2r_125cm_0_30,r2r_125cm_0_45,r2r_60cm_15_15,r2r_60cm_30_30,rxr_125cm_0_30,rxr_125cm_0_45,rxr_60cm_15_15,rxr_60cm_30_30 \
+    --data_flatten False \
+    --tune_mm_vision True \
+    --tune_mm_mlp True \
+    --tune_mm_llm True \
+    --bf16 \
+    --num_history 8 \
+    --data_augmentation True \
+    --resize_h 384 --resize_w 384 \
+    --sample_step 4 \
+    --num_future_steps 4 \
+    --predict_step_num 32 \
+    --pixel_goal_only False \
+    --system1 "none" \
+    --output_dir checkpoints/InternVLA-N1-System2-Qwen3VL-2B \
+    --num_train_epochs 2.0 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 1 \
+    --max_pixels 313600 --min_pixels 3136 \
+    --learning_rate 2e-5 \
+    --vision_tower_lr 5e-6 \
+    --weight_decay 0 \
+    --warmup_ratio 0.003 \
+    --max_grad_norm 1 \
+    --lr_scheduler_type cosine \
+    --model_max_length 8192 \
+    --gradient_checkpointing True \
+    --dataloader_num_workers 4 \
+    --save_strategy steps \
+    --save_steps 5000 \
+    --save_total_limit 5 \
+    --logging_steps 1 \
+    --run_name InternVLA-N1-System2-Qwen3VL-2B \
+    --report_to wandb
+```
+
+SLURM 集群训练，在 `train_system2_qwen3vl.sh` 中修改：
+
+```bash
+llm=Qwen/Qwen3-VL-2B-Instruct
+run_name=InternVLA-N1-System2-Qwen3VL-2B
+output_dir=checkpoints/${run_name}
+batch_size=8          # 2B 模型显存占用最小，可大幅增大 batch
+```
+
+---
+
+### Qwen2.5-VL-3B（约 3B 级别）
 
 **推荐场景：** 资源有限、快速原型验证、单机 2-4 卡
 
@@ -461,7 +549,8 @@ deepspeed=scripts/train/qwenvl_train/zero3_offload.json
 
 | 模型 | ZeRO-2 所需 GPU 数 | ZeRO-3 所需 GPU 数 | 备注 |
 |------|-------------------|-------------------|------|
-| Qwen2.5-VL-3B | 2 张 80GB | 1 张 80GB | 资源要求最低 |
+| Qwen3-VL-2B | 1 张 80GB（或 2 张 24GB） | 1 张 24GB | 资源要求最低 |
+| Qwen2.5-VL-3B | 2 张 80GB | 1 张 80GB | |
 | Qwen3-VL-4B | 2 张 80GB | 1 张 80GB | |
 | Qwen2.5-VL-7B | 4 张 80GB | 2 张 80GB | 官方推荐配置 |
 | Qwen3-VL-8B | 4 张 80GB | 2 张 80GB | 官方推荐配置 |

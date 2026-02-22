@@ -26,6 +26,7 @@
 - `docs/new/InternNav 自定义 S1-S2 系统开发指南.md`：S1/S2 解耦开发接口规范
 - `scripts/realworld2/`：LingNav Phase 1-3 全部脚本（S2 服务、管线、ROS2 客户端）
 - `scripts/inference/NavDP/navdp_local_client.py`：NavDP 端侧本地推理客户端（Phase 3.5）
+- `lingnav_pipeline.py --random`：显式随机噪声图参数，与 `test_s2_client.py` 接口一致（Phase 3.5）
 
 ---
 

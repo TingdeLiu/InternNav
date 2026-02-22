@@ -206,14 +206,14 @@ python scripts/realworld2/test_s2_client.py \
 ### 4. 测试 LingNav 管线（S2 + S1 联调，不需要机器人）
 
 ```bash
-# 两个服务器都启动后，在任意机器上运行
+# S2 + S1 均在线，使用真实图片
 python scripts/realworld2/lingnav_pipeline.py \
     --s2_host 192.168.1.100 --s2_port 8890 \
     --s1_host 192.168.1.100 --s1_port 8901 \
     --image /path/to/test.jpg \
     --instruction "Go to the red chair"
 
-# 仅测试 S2（NavDP 未启动时）
+# 仅测试 S2 连通性（NavDP 未启动时），使用随机噪声图
 python scripts/realworld2/lingnav_pipeline.py \
     --s2_host 192.168.1.100 --s2_port 8890 \
     --s1_host 192.168.1.100 --s1_port 8901 \
@@ -221,6 +221,19 @@ python scripts/realworld2/lingnav_pipeline.py \
     --instruction "Go to the door" \
     --skip_s1
 ```
+
+**`lingnav_pipeline.py` 参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--s2_host` | `127.0.0.1` | S2 服务器 IP |
+| `--s2_port` | `8890` | S2 端口 |
+| `--s1_host` | `127.0.0.1` | S1 服务器 IP |
+| `--s1_port` | `8901` | S1 端口 |
+| `--instruction` | `"Go to the red chair"` | 导航指令 |
+| `--image` | — | 真实图片路径（与 `--random` 二选一）|
+| `--random` | False | 使用随机噪声图像（连通性测试，不验证识别结果）|
+| `--skip_s1` | False | 跳过 S1 调用（NavDP 未启动时使用）|
 
 **预期输出（S2+S1 均在线，真实图片）：**
 ```

@@ -302,10 +302,15 @@ if __name__ == "__main__":
     parser.add_argument("--s1_host", default="127.0.0.1")
     parser.add_argument("--s1_port", type=int, default=8901)
     parser.add_argument("--instruction", default="Go to the red chair")
-    parser.add_argument("--image", default=None, help="真实图片路径（不填则用随机噪声）")
+    parser.add_argument("--image", default=None, help="真实图片路径")
+    parser.add_argument("--random", action="store_true",
+                        help="使用随机噪声图像（连通性测试，不验证识别结果）")
     parser.add_argument("--skip_s1", action="store_true",
                         help="跳过 S1 调用（仅测试 S2，NavDP 未启动时使用）")
     args = parser.parse_args()
+
+    if not args.image and not args.random:
+        parser.error("请提供 --image <路径> 或 --random")
 
     print("=" * 55)
     print("  LingNav Pipeline — 快速测试")
@@ -331,12 +336,12 @@ if __name__ == "__main__":
         pipeline.reset(args.instruction)
 
     # ── 准备图像 ──────────────────────────────────────────────────────────────
-    if args.image:
-        rgb, depth = _load_inputs(args.image)
-        print(f"\n[3] 图像来源: {args.image}")
-    else:
+    if args.random:
         rgb, depth = _make_fake_inputs()
         print("\n[3] 图像来源: 随机噪声 640×480（S2 目标检测结果仅供连通性参考）")
+    else:
+        rgb, depth = _load_inputs(args.image)
+        print(f"\n[3] 图像来源: {args.image}")
 
     # ── 单步推理 ──────────────────────────────────────────────────────────────
     print(f"\n[4] 执行 step(), instruction='{args.instruction}' …")

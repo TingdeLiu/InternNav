@@ -370,6 +370,229 @@ git clone https://github.com/NavDP/NavDP ~/NavDP
 
 ---
 
+### Phase 5：多步指令导航
+
+**目标：** 支持 "先去 A，再去 B" 形式的有序多子任务导航，S2 负责指令分解与完成判断。
+
+#### 5.1 设计概述
+
+```
+[任务开始]
+  pipeline.decompose("先去桌子，再去门口")
+      │
+      ▼  POST /s2_decompose
+  task_queue = ["Go to the table", "Go to the door"]
+  current_task = task_queue[0], steps = 0
+
+[执行循环 0.3s/次]
+  ┌──────────────────────────────────────────────────┐
+  │  S1 跟踪轨迹 → 机器人前进                          │
+  │      ↓ S1 完成（Critic 触发 / 轨迹走完）            │
+  │  机器人静止                                        │
+  │      ↓                                            │
+  │  dist = 深度反投影(current_pixel, depth_m)         │
+  │      ↓                                            │
+  │  POST /s2_step(image, current_task,               │
+  │                steps_on_task, dist_to_target)     │
+  │      ↓                                            │
+  │  done=false → steps++ → 继续执行                   │
+  │  done=true  → ✅ current_task                     │
+  │               current_task = next                 │
+  │               若无 next → 全部完成，停止            │
+  └──────────────────────────────────────────────────┘
+```
+
+**完成判断三维度（均由 S2 综合评估）：**
+
+| 维度 | 信号 | 作用 |
+|------|------|------|
+| 语义/空间正确性 | 当前帧图像 | 判断"沙发左边/门前"等空间关系是否满足 |
+| 客观距离 | `dist_to_target`（米） | 防止远距离时误判完成 |
+| 超时兜底 | `steps_on_task` | 步数超限时强制进入下一子任务 |
+
+---
+
+#### 5.2 S2 服务器改动（`wheeltec_s2_server.py`）
+
+**新增端点 `POST /s2_decompose`：**
+
+```
+输入: { "instruction": "先去桌子，再去门口" }
+输出: { "tasks": ["Go to the table", "Go to the door"] }
+```
+
+Prompt 设计：
+```
+你是导航任务规划器。将用户的导航指令分解为有序的单目标子任务列表。
+每个子任务必须是一句完整的导航指令（包含目标和空间关系）。
+只输出 JSON 数组，不要其他内容。
+示例：["Go to the table", "Go to the left side of the sofa"]
+```
+
+**`/s2_step` 请求新增字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `steps_on_task` | int | 当前子任务已执行步数 |
+| `dist_to_target` | float \| null | 目标距离（米），深度无效时为 null |
+
+**`/s2_step` 响应新增字段：**
+
+```
+{"target": "table", "point_2d": [320, 240], "done": false}
+↑↑←
+
+{"target": "table", "point_2d": null, "done": true}
+stop
+```
+
+`/s2_step` System Prompt 新增规则：
+```
+# Sub-task Completion
+You are executing sub-task {task_index+1}/{task_total}: "{current_task}"
+Steps taken: {steps_on_task} | Distance to target: {dist_to_target} m (null if unavailable)
+
+Judgment rules:
+1. Examine the image: is the robot in the correct position described by the sub-task
+   (including spatial relations like "left side", "in front of")?
+2. Is dist_to_target < 1.0m (or visually close if null)?
+3. If BOTH conditions met → add "done": true to JSON output.
+4. If steps_on_task > {max_steps} → force "done": true (timeout fallback).
+5. Otherwise → "done": false, continue navigation.
+```
+
+---
+
+#### 5.3 管线改动（`lingnav_pipeline.py`）
+
+**新增 `decompose()` 方法：**
+
+```python
+pipeline.decompose("先去桌子，再去门口")
+# 调用 /s2_decompose → 内部建立 task_queue
+# → ["Go to the table", "Go to the door"]
+```
+
+**`reset()` 适配多步模式：**
+
+```python
+# 单步（原有，不变）
+pipeline.reset("Go to the table")
+
+# 多步（decompose 后调用）
+pipeline.decompose("先去桌子，再去门口")
+pipeline.reset()   # 不传 instruction，使用 task_queue[0]
+```
+
+**`step()` 新增逻辑：**
+
+- 维护 `current_pixel`（缓存上一帧 S2 输出的像素坐标）
+- 机器人静止时（S1 完成）调用 `_compute_dist(depth_m, current_pixel)`
+- 将 `steps_on_task` + `dist_to_target` 附加到 `/s2_step` 请求
+- 收到 `done=true` → 推进任务队列，返回新 mode `"task_done"`
+
+**新增工具函数 `_compute_dist()`：**
+
+```python
+def _compute_dist(depth_m, pixel, intrinsic):
+    """
+    将像素坐标 + 深度反投影为3D距离（米）。
+    pixel: [u, v]，intrinsic: (4,4)
+    返回 float 或 None（深度无效时）
+    """
+    u, v = int(pixel[0]), int(pixel[1])
+    d = depth_m[v, u]
+    if d <= 0 or not np.isfinite(d):
+        return None
+    fx = intrinsic[0, 0]; cx = intrinsic[0, 2]
+    fy = intrinsic[1, 1]; cy = intrinsic[1, 2]
+    X = (u - cx) * d / fx
+    Y = (v - cy) * d / fy
+    return float(np.sqrt(X**2 + Y**2 + d**2))
+```
+
+**`step()` 返回值新增 mode：**
+
+| mode | 含义 |
+|------|------|
+| `"task_done"` | 当前子任务完成，已切换到下一子任务 |
+| `"all_done"` | 全部子任务完成，导航结束 |
+
+---
+
+#### 5.4 ROS2 客户端改动（`lingnav_ros_client.py`）
+
+**`Mode` 枚举新增：**
+
+```python
+class Mode(Enum):
+    IDLE        = auto()
+    TRAJECTORY  = auto()
+    ROTATE      = auto()
+    STOP        = auto()
+    TASK_DONE   = auto()   # 新增：子任务完成，短暂停顿后切换
+    ALL_DONE    = auto()   # 新增：全部完成
+```
+
+**规划线程新增处理：**
+
+```python
+elif mode == "task_done":
+    task_name = result["completed_task"]
+    next_task = result["next_task"]
+    self.get_logger().info(f"[Plan] ✅ '{task_name}' → 下一任务: '{next_task}'")
+    self._set_mode(Mode.TASK_DONE)   # 停顿 1s 再继续
+
+elif mode == "all_done":
+    self.get_logger().info("[Plan] ✅ 所有子任务完成，导航结束")
+    self._set_mode(Mode.ALL_DONE)
+```
+
+**启动方式（多步指令）：**
+
+```bash
+# 先分解指令，再启动导航
+python3 scripts/realworld2/lingnav_ros_client.py \
+    --instruction "先去桌子，然后去门口" \
+    --s2_host 192.168.1.100 \
+    --multi_step          # 新增 flag：触发 decompose 流程
+```
+
+**运行时日志示例：**
+
+```
+[LingNav] Decomposing: "先去桌子，然后去门口"
+[LingNav] Tasks: ["Go to the table", "Go to the door"]
+[Plan] mode=trajectory | task=1/2 | target=table | steps=3 | dist=2.1m
+[Plan] mode=trajectory | task=1/2 | target=table | steps=7 | dist=0.7m
+[Plan] ✅ "Go to the table" (steps=8, dist=0.6m) → 下一任务: "Go to the door"
+[Plan] mode=trajectory | task=2/2 | target=door  | steps=2 | dist=3.4m
+[Plan] ✅ "Go to the door"  (steps=6, dist=0.5m) → 全部完成
+[LingNav] Stopped.
+```
+
+---
+
+#### 5.5 改动文件汇总
+
+| 文件 | 改动类型 | 说明 |
+|------|---------|------|
+| `wheeltec_s2_server.py` | 新增端点 + 响应字段 | `/s2_decompose`；`/s2_step` 加 `done`、接收 `steps_on_task`/`dist_to_target` |
+| `lingnav_pipeline.py` | 新增方法 + 状态 | `decompose()`、`_compute_dist()`、任务队列管理、新 mode |
+| `lingnav_ros_client.py` | 新增参数 + 状态 | `--multi_step`、`TASK_DONE`/`ALL_DONE` mode、日志 |
+
+---
+
+#### 5.6 超时兜底参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `dist_threshold` | `1.0` m | 到达判定距离 |
+| `max_steps_per_task` | `30` 步 | 单子任务最大步数（≈9s），超时强制推进 |
+| `task_done_pause` | `1.0` s | 子任务切换时停顿时间 |
+
+---
+
 ### Phase 4（可选）：S1 NavDP 训练优化
 
 **触发条件：** Phase 3 测试后，SR < 50% 且主要失败原因是轨迹质量差（而非 S2 目标识别错误）
@@ -439,3 +662,5 @@ python scripts/train/train.py \
 | **M4: 机器人单场景** | 固定房间内，"去红色椅子"等 5 条指令 SR ≥ 60% |
 | **M4.5: S1 端侧部署验证** | Jetson 本地加载 NavDP（fp16），`--local_s1` 模式下 pixelgoal_step 输出合理轨迹，端到端延迟 < 500ms |
 | **M5: 多场景泛化** | 20 条测试路线 SR ≥ 50%（若不达标则进入 Phase 4 S1 训练） |
+| **M6: 多步指令分解** | `/s2_decompose` 正确拆解 10 条双目标指令，任务列表语义准确率 > 90% |
+| **M7: 多步导航闭环** | "先去 A 再去 B" 类型指令，双目标 SR ≥ 50%（A、B 均到达）；`done` 误判率 < 20% |

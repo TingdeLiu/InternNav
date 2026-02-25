@@ -1,13 +1,14 @@
-# NavDP S1 单独推理技术文档
+# NavDP S1 单独推理指南
 
 > NavDP (Navigation Diffusion Policy) 是 InternVLA-N1 双系统中的 System-1 低层运动控制策略。
 > 本文档介绍如何在 InternNav 框架中**单独启动和调用 NavDP S1**，无需 S2 (VLM) 参与。
+> 提供两种部署方案：**GPU 服务器 HTTP 模式**（适合仿真评测、LingNav 模式 A）和 **Wheeltec 小车端侧模式**（适合 LingNav 模式 B 低延迟实机部署）。
 
 ## 目录
 
 - [1. 架构概览](#1-架构概览)
-- [2. 环境准备](#2-环境准备)
-- [3. 快速开始](#3-快速开始)
+- [2. 部署方案一：GPU 服务器（HTTP 模式）](#2-部署方案一gpu-服务器http-模式)
+- [3. 部署方案二：Wheeltec 小车端侧部署](#3-部署方案二wheeltec-小车端侧部署)
 - [4. API 接口详解](#4-api-接口详解)
 - [5. 数据格式说明](#5-数据格式说明)
 - [6. 推理流程详解](#6-推理流程详解)
@@ -19,9 +20,9 @@
 
 ## 1. 架构概览
 
-### 1.1 Client-Server 解耦架构
+### 1.1 两种部署架构
 
-NavDP S1 采用 **HTTP Client-Server 解耦架构**，将模型推理与环境仿真完全分离：
+**方案一：HTTP Client-Server 模式（GPU 服务器）**
 
 ```
 ┌─────────────────┐    HTTP    ┌──────────────────┐
@@ -38,10 +39,32 @@ NavDP S1 采用 **HTTP Client-Server 解耦架构**，将模型推理与环境�
                                └──────────────────┘
 ```
 
-**优势：**
-- 模型推理和评测环境可运行在不同机器 / 不同 conda 环境
-- 天然支持异步推理（规划线程与控制线程分离）
-- 兼容 NavDP 项目的 IsaacSim 评测脚本
+**方案二：端侧本地推理模式（Jetson Orin NX）**
+
+```
+┌─────────────────────────────────────────────────┐
+│  Jetson Orin NX 16GB                             │
+│                                                  │
+│  lingnav_ros_client.py (--local_s1)              │
+│  ┌───────────────────────────────────┐           │
+│  │  NavDPLocalClient                 │           │
+│  │  ┌───────────────────────────┐    │           │
+│  │  │  NavDPAgent               │    │           │
+│  │  │  ┌─────────────────────┐  │    │           │
+│  │  │  │  NavDP_Policy (fp16)│  │    │           │
+│  │  │  └─────────────────────┘  │    │           │
+│  │  └───────────────────────────┘    │           │
+│  └───────────────────────────────────┘           │
+│  显存占用：~200-400MB                             │
+└─────────────────────────────────────────────────┘
+```
+
+| 指标 | 方案一（HTTP 模式） | 方案二（端侧模式） |
+|------|-------------------|------------------|
+| S1 推理延迟 | ~100-300ms（网络+服务器） | ~50-150ms（本地 fp16） |
+| 网络依赖 | 需要 S1 服务器网络 | 无（本地推理） |
+| Jetson 显存 | 极少（仅 ROS2） | ~200-400MB（NavDP fp16） |
+| 适用场景 | 仿真评测、LingNav 模式 A | LingNav 模式 B 实机 |
 
 ### 1.2 核心组件
 
@@ -52,6 +75,7 @@ NavDP S1 采用 **HTTP Client-Server 解耦架构**，将模型推理与环境�
 | `internnav/model/basemodel/navdp/policy_backbone.py` | RGBD / ImageGoal / PixelGoal 编码器 |
 | `scripts/inference/NavDP/navdp_server.py` | Flask HTTP 推理服务，暴露 5 个 API 端点 |
 | `scripts/inference/NavDP/navdp_client.py` | HTTP 客户端 Python API |
+| `scripts/inference/NavDP/navdp_local_client.py` | 端侧本地推理客户端，无 HTTP，支持 fp16 |
 
 ### 1.3 支持的导航任务
 
@@ -65,7 +89,9 @@ NavDP S1 采用 **HTTP Client-Server 解耦架构**，将模型推理与环境�
 
 ---
 
-## 2. 环境准备
+## 2. 部署方案一：GPU 服务器（HTTP 模式）
+
+适用于仿真评测（IsaacSim / Habitat）及 LingNav 双服务器模式（模式 A）。
 
 ### 2.1 前提条件
 
@@ -81,11 +107,7 @@ NavDP S1 采用 **HTTP Client-Server 解耦架构**，将模型推理与环境�
 pip install flask torch diffusers opencv-python imageio
 ```
 
----
-
-## 3. 快速开始
-
-### 3.1 启动 Server
+### 2.3 启动 Server
 
 ```bash
 cd InternNav/
@@ -93,28 +115,34 @@ cd InternNav/
 # 基本启动
 python scripts/inference/NavDP/navdp_server.py \
     --port 8901 \
-    --checkpoint /path/to/navdp_checkpoint.ckpt
+    --checkpoint /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt
 
 # 完整参数
 python scripts/inference/NavDP/navdp_server.py \
     --port 8901 \
-    --checkpoint /path/to/navdp_checkpoint.ckpt \
-    --device cuda:7 \
+    --checkpoint /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt \
+    --host 0.0.0.0 \
+    --device cuda:0 \
     --image_size 224 \
     --memory_size 8 \
     --predict_size 24
 ```
 
-Server 启动后会在指定端口监听 HTTP 请求。
+启动成功输出：
+```
+NavDP S1 Server starting on 0.0.0.0:8901
+  Checkpoint: /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt
+  Device: cuda:0
+```
 
-### 3.2 使用 Python Client 调用
+### 2.4 使用 Python Client 调用
 
 ```python
 import numpy as np
 from scripts.inference.NavDP.navdp_client import NavDPClient
 
 # 1. 创建客户端
-client = NavDPClient(port=8888)
+client = NavDPClient(port=8901)
 
 # 2. 重置（传入相机内参）
 camera_intrinsic = np.array([
@@ -138,13 +166,12 @@ print(f"候选轨迹数: {all_traj.shape[1]}, critic 最高分: {values.max():.2
 trajectory, all_traj, values = client.nogoal_step(rgb, depth)
 ```
 
-### 3.3 直接使用 Agent（无需 Server）
+### 2.5 直接使用 Agent（无需 Server）
 
 ```python
 import numpy as np
 from internnav.agent.navdp_agent import NavDPAgent
 
-# 构造相机内参
 intrinsic = np.array([
     [386.5, 0.0, 328.9, 0.0],
     [0.0, 386.5, 244.0, 0.0],
@@ -152,49 +179,148 @@ intrinsic = np.array([
     [0.0, 0.0, 0.0, 1.0]
 ])
 
-# 创建 Agent
 agent = NavDPAgent(
     camera_intrinsic=intrinsic,
-    checkpoint="/path/to/navdp_checkpoint.ckpt",
+    checkpoint="/data2/ltd/checkpoints/NavDP/navdp-weights.ckpt",
     device="cuda:0",
 )
 agent.reset(batch_size=1)
 
-# 逐帧推理
 for step in range(100):
     rgb = get_rgb_from_sensor()      # (1, H, W, 3) BGR
     depth = get_depth_from_sensor()  # (1, H, W, 1) float32 米
 
-    # 点目标
     goal = np.array([[3.0, 1.0, 0.0]])  # (1, 3)
     best_traj, all_traj, values, vis_img = agent.step_pointgoal(goal, rgb, depth)
 
     # best_traj: (1, 24, 3) 最优轨迹
-    # vis_img: 轨迹投影到图像的可视化
     action = best_traj[0, 0]  # 取第一步动作 [dx, dy, dz]
 ```
 
-### 3.4 配合 NavDP 项目 IsaacSim 评测
+### 2.6 配合 NavDP 项目 IsaacSim 评测
 
 Server 兼容 NavDP 项目的 HTTP 协议，可直接使用 NavDP 的评测脚本：
 
 ```bash
 # Terminal 1: 在 InternNav 环境启动 server
 cd InternNav/
-python scripts/inference/NavDP/navdp_server.py --port 8901 --checkpoint /path/to/ckpt
+python scripts/inference/NavDP/navdp_server.py --port 8901 --checkpoint /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt
 
 # Terminal 2: 在 NavDP/IsaacSim 环境运行评测
 cd NavDP/
 python eval_pointgoal_wheeled.py --port 8901 --scene_dir /path/to/scenes --scene_index 0
-python eval_nogoal_wheeled.py --port 8901 --scene_dir /path/to/scenes --scene_index 0
+python eval_nogoal_wheeled.py    --port 8901 --scene_dir /path/to/scenes --scene_index 0
 python eval_imagegoal_wheeled.py --port 8901 --scene_dir /path/to/scenes --scene_index 0
 ```
 
 ---
 
+## 3. 部署方案二：Wheeltec 小车端侧部署
+
+将 NavDP 直接运行在 Wheeltec 小车的 **Jetson Orin NX 16GB** 上，通过 `navdp_local_client.py` 进行本地推理，无 HTTP 网络开销。对应 LingNav 模式 B。
+
+### 3.1 Jetson 环境准备
+
+```bash
+# Jetson 端（首次安装）
+# torch / torchvision：JetPack 5.x 通常已自带，或按官方 wheel 安装
+pip3 install numpy Pillow opencv-python
+
+# 安装 InternNav（含 NavDP 策略网络）
+cd ~/InternNav
+pip3 install -e .
+
+# 初始化 diffusion-policy 子模块（NavDP 依赖）
+git submodule update --init --recursive
+export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
+```
+
+### 3.2 获取 NavDP Checkpoint
+
+从官方发布页下载后传到 Jetson：
+
+```bash
+# 从 GPU 服务器复制到 Jetson
+scp user@gpu-server:/data2/ltd/checkpoints/NavDP/navdp-weights.ckpt /home/wheeltec/VLN/checkpoints/navdp-weights.ckpt
+```
+
+### 3.3 使用 NavDPLocalClient
+
+`navdp_local_client.py` 与 `NavDPClient`（HTTP 版）接口完全一致，直接替换即可：
+
+```python
+from scripts.inference.NavDP.navdp_local_client import NavDPLocalClient
+import numpy as np
+
+# 创建本地客户端（fp16 推荐，约节省 50% 显存）
+client = NavDPLocalClient(
+    checkpoint="/home/wheeltec/VLN/checkpoints/navdp-weights.ckpt",
+    device="cuda:0",
+    half=True,
+)
+
+camera_intrinsic = np.array([
+    [386.5, 0.0, 328.9, 0.0],
+    [0.0, 386.5, 244.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0]
+])
+client.reset(camera_intrinsic, batch_size=1)
+
+rgb   = np.random.randint(0, 255, (1, 480, 640, 3), dtype=np.uint8)
+depth = np.ones((1, 480, 640), dtype=np.float32) * 2.0
+
+# 像素目标（LingNav 使用）
+pixel_goal = np.array([[320, 240]])   # (B, 2) 图像坐标
+trajectory, all_traj, values = client.pixelgoal_step(pixel_goal, rgb, depth)
+
+# 点目标
+goal = np.array([[3.0, 1.0]])
+trajectory, all_traj, values = client.pointgoal_step(goal, rgb, depth)
+```
+
+### 3.4 在 LingNav ROS2 中使用（模式 B 完整启动）
+
+```bash
+# ── GPU 服务器：只启动 S2，不需要 navdp_server ──────────────────────
+python scripts/realworld2/wheeltec_s2_server.py \
+    --model_path /data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct \
+    --port 8890 --host 0.0.0.0 --device auto
+
+# ── Jetson 端：Terminal 1 — 启动机器人底盘 ────────────────────────────
+source /opt/ros/humble/setup.bash
+ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
+
+# ── Jetson 端：Terminal 2 — 启动相机 ─────────────────────────────────
+ros2 launch turn_on_wheeltec_robot wheeltec_camera.launch.py
+
+# ── Jetson 端：Terminal 3 — 启动 LingNav（端侧 S1 模式）───────────────
+source /opt/ros/humble/setup.bash
+export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
+
+python3 scripts/realworld2/lingnav_ros_client.py \
+    --instruction "Go to the red chair" \
+    --s2_host 192.168.1.100 \
+    --local_s1 \
+    --s1_checkpoint /home/wheeltec/VLN/checkpoints/navdp-weights.ckpt \
+    --s1_device cuda:0 \
+    --s1_half                    # 推荐：fp16 节省显存、加快推理
+```
+
+**端侧模式参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--local_s1` | False | 开启端侧本地推理（无需 navdp_server） |
+| `--s1_checkpoint` | 必填 | NavDP 权重文件路径（.ckpt）|
+| `--s1_device` | `cuda:0` | 推理设备 |
+| `--s1_half` | False | 开启 fp16（Jetson 推荐，约 50% 显存节省）|
+
+---
+
 ## 4. API 接口详解
 
-### 4.1 Server 端点一览
+### 4.1 Server 端点一览（方案一）
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
@@ -251,10 +377,14 @@ class NavDPAgent:
     def step_mixgoal(point_goals, image_goals, images, depths) -> (traj, all_traj, values, vis)
 ```
 
-### 4.5 NavDPClient Python API
+### 4.5 NavDPClient / NavDPLocalClient Python API
+
+两者接口完全一致，可互相替换：
 
 ```python
-class NavDPClient:
+class NavDPClient:         # 方案一：HTTP 版
+class NavDPLocalClient:    # 方案二：端侧版
+
     def reset(camera_intrinsic, batch_size=1, stop_threshold=-3.0) -> str
     def reset_env(env_id: int) -> str
 
@@ -399,7 +529,7 @@ step 8:  [frame_1, frame_2, ..., frame_8]  ← 最旧帧被移除
 
 ### 7.2 模型差异
 
-| 特性 | NavDP_Policy (本文档) | NavDP_DPT_CriticSum_DAT (双系统) |
+| 特性 | NavDP_Policy（本文档） | NavDP_DPT_CriticSum_DAT（双系统） |
 |------|----------------------|----------------------------------|
 | 条件输入 | pointgoal / imagegoal / pixelgoal / nogoal | VLM traj_latents (3584→384) |
 | RGBD 编码 | DepthAnythingV2 backbone | DAT_RGBD_Patch_Backbone |
@@ -417,29 +547,22 @@ step 8:  [frame_1, frame_2, ..., frame_8]  ← 最旧帧被移除
 
 ```python
 class MyS1Policy(nn.Module):
-    """自定义 S1 策略网络"""
-
     def predict_pointgoal_action(self, goal_point, input_images, input_depths, sample_num=16):
-        """点目标推理
-
+        """
         Args:
             goal_point: (B, 3) float32 目标坐标
-            input_images: (B, memory_size, 224, 224, 3) float32 [0,1] 归一化 RGB
+            input_images: (B, memory_size, 224, 224, 3) float32 [0,1]
             input_depths: (B, 224, 224, 1) float32 当前深度图
-
         Returns:
-            all_trajectory: (B, sample_num, predict_size, 3) numpy 所有候选轨迹
-            all_values: (B, sample_num) numpy critic 评分
-            positive_trajectory: (B, 2, predict_size, 3) numpy top-2 最优
-            negative_trajectory: (B, 2, predict_size, 3) numpy top-2 最差
+            all_trajectory: (B, sample_num, predict_size, 3)
+            all_values: (B, sample_num)
+            positive_trajectory: (B, 2, predict_size, 3)
+            negative_trajectory: (B, 2, predict_size, 3)
         """
         ...
 
     def predict_nogoal_action(self, input_images, input_depths, sample_num=16):
-        """无目标推理（接口同上，去掉 goal_point）"""
         ...
-
-    # 可选：实现 predict_imagegoal_action / predict_pixelgoal_action / predict_ip_action
 ```
 
 ### 8.2 集成步骤
@@ -452,14 +575,7 @@ class MyS1Policy(nn.Module):
 
 2. **适配初始化参数**（如果构造函数签名不同）
 
-3. **保持输入输出格式不变**，Server 和 Client 无需修改
-
-### 8.3 集成到双系统
-
-如果想将自定义 S1 集成到 InternVLA-N1 双系统，参考 `docs/custom_s1_s2_development_guide.md`：
-- 在 `internvla_n1_arch.py` 中注册新的 build 函数
-- 在 `internvla_n1.py` 的 `initialize_vision_modules()` 中添加分支
-- 确保接受 `traj_latents` 作为条件输入
+3. **保持输入输出格式不变**，Server 和 LocalClient 无需修改
 
 ---
 
@@ -472,32 +588,28 @@ class MyS1Policy(nn.Module):
 
 ### Q: 推理速度如何？
 
-在单张 RTX 3090 上：
-- 单次推理（16 条候选轨迹）约 50-100ms
-- 扩散采样 10 步是主要耗时
+- **服务器（RTX 3090）**：单次推理（16 条候选轨迹）约 50-100ms
+- **Jetson Orin NX（fp16）**：约 50-150ms
 - 可通过减少 `sample_num` 加速
 
-### Q: 如何在 ROS 中使用？
+### Q: Jetson 显存不足怎么办？
 
-1. 启动 Server：`python scripts/inference/NavDP/navdp_server.py --port 8888 --checkpoint /path/to/ckpt`
-2. 在 ROS 节点中使用 `NavDPClient` 调用
+使用 `--s1_half` 开启 fp16，显存从 ~400MB 降至 ~200MB。
+如果仍不足，可减少 `predict_size`（默认 24）或 `sample_num`（默认 16）。
+
+### Q: 如何在 ROS 中使用（不含 LingNav）？
+
+1. 选择方案：服务器启 `navdp_server.py`，或 Jetson 端用 `NavDPLocalClient`
+2. 在 ROS 节点中调用对应 client 的 `pixelgoal_step` / `pointgoal_step`
 3. 将返回的轨迹转换为 ROS 消息发布
-
-### Q: InternNav 的 NavDPNet 和 NavDP 项目的 NavDP_Policy 有什么区别？
-
-两者架构相同，但：
-- **NavDPNet** (`internnav/model/basemodel/navdp/`)：仅支持 pointgoal/nogoal，使用 HuggingFace PreTrainedModel 接口
-- **NavDP_Policy** (`NavDP/baselines/navdp/`)：支持全部 5 种任务模式，直接 `torch.load` 加载
-
-本方案选择复用 NavDP_Policy 以获得完整功能。
 
 ### Q: 如何训练自己的 NavDP 模型？
 
-使用 InternNav 的训练脚本：
 ```bash
 cd InternNav/
 bash scripts/train/base_train/start_train.sh navdp
 ```
+
 训练配置见 `scripts/train/base_train/configs/navdp.py`。
 
 ### Q: 深度图必须是真实的吗？

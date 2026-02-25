@@ -144,7 +144,7 @@ User Prompt：
 
 ```
 功能：
-  - 加载 Qwen3-VL (Qwen/Qwen3-VL-7B-Instruct 或 Qwen/Qwen3-VL-3B-Instruct)
+  - 加载 Qwen3-VL (Qwen/Qwen3-VL-8B-Instruct 或 Qwen/Qwen3-VL-4B-Instruct)
   - Flask API: POST /s2_step { image, instruction, step, history }
               → { action, pixel/angle, confidence, reason }
   - 维护多轮对话历史（可选，用于长指令任务）
@@ -294,7 +294,7 @@ NavDP 模型本身较小（约 200-400MB fp16），Jetson Orin NX 16GB 完全可
 from navdp_local_client import NavDPLocalClient
 
 client = NavDPLocalClient(
-    checkpoint="/path/to/navdp.ckpt",
+    checkpoint="/home/wheeltec/VLN/checkpoints/navdp-weights.ckpt",
     device="cuda:0",
     half=True,        # fp16，Jetson 推荐
 )
@@ -332,7 +332,7 @@ pipeline = LingNavPipeline(
 ```bash
 # GPU 服务器：只需启动 S2
 python scripts/realworld2/wheeltec_s2_server.py \
-    --model_path Qwen/Qwen3-VL-7B-Instruct --port 8890
+    --model_path /data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct --port 8890
 
 # Jetson 端：端侧 S1 模式
 export NAVDP_ROOT=~/NavDP
@@ -342,7 +342,7 @@ python3 scripts/realworld2/lingnav_ros_client.py \
     --instruction "Go to the red chair" \
     --s2_host 192.168.1.100 \
     --local_s1 \
-    --s1_checkpoint ~/NavDP/checkpoints/navdp.ckpt \
+    --s1_checkpoint /home/wheeltec/VLN/checkpoints/navdp-weights.ckpt \
     --s1_half
 ```
 

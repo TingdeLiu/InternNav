@@ -109,117 +109,180 @@ S2 (Qwen3-VL 7B) 仍在 GPU 服务器运行（Jetson 16GB 不足以同时跑 7B 
 
 ## 启动方式
 
-### 0. 依赖安装（首次）
+### 0. 首次依赖安装
+
+**GPU 服务器：**
 
 ```bash
 conda activate internnav
-
-# S2 服务器额外依赖
 pip install flask transformers>=4.57.0
-
 # flash-attn（可选，无则自动降级到 sdpa）
 pip install flash-attn --no-build-isolation
 ```
 
-### 1. 启动 S1 — NavDP 推理服务器
+**Jetson 端（两种模式共用）：**
 
 ```bash
-# 在 GPU 服务器上
+pip3 install numpy requests Pillow opencv-python casadi scipy \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+sudo apt install ros-humble-cv-bridge ros-humble-message-filters
+```
+
+---
+
+### 模式 A：双服务器完整启动
+
+S2 (Qwen3-VL) 和 S1 (NavDP) **均在 GPU 服务器运行**，Jetson 通过 HTTP 调用。
+
+#### A.1 GPU 服务器 — 启动 S2（Qwen3-VL）
+
+```bash
+conda activate internnav
+cd /path/to/InternNav
+
+# 7B 模型（推荐，约需 16GB 显存）
+python scripts/realworld2/wheeltec_s2_server.py \
+    --model_path /data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct \
+    --port 8890 \
+    --host 0.0.0.0 \
+    --device auto
+```
+
+#### A.2 GPU 服务器 — 启动 S1（NavDP）
+
+```bash
+# 新终端
 conda activate internnav
 cd /path/to/InternNav
 
 python scripts/inference/NavDP/navdp_server.py \
-    --checkpoint /path/to/navdp_checkpoint.ckpt \
+    --checkpoint /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt \
     --port 8901 \
     --host 0.0.0.0 \
     --device cuda:0
 ```
 
-> NavDP checkpoint 获取：参见 `docs/new/navdp_s1_standalone_guide.md` 中的下载链接。
-
 启动成功输出：
 ```
 NavDP S1 Server starting on 0.0.0.0:8901
-  Checkpoint: /path/to/navdp_checkpoint.ckpt
+  Checkpoint: /data2/ltd/checkpoints/NavDP/navdp-weights.ckpt
   Device: cuda:0
 ```
 
-### 2. 启动 S2 — Qwen3-VL 推理服务器
+> NavDP checkpoint 下载：参见 `docs/new/s1_navdp_guide.md` 中的链接。
+
+#### A.3 Jetson — 启动 ROS2 客户端
 
 ```bash
-# 在 GPU 服务器上（新终端）
+# Terminal 1 — 机器人底盘
+source /opt/ros/humble/setup.bash
+ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
+
+# Terminal 2 — 相机
+ros2 launch turn_on_wheeltec_robot wheeltec_camera.launch.py
+
+# Terminal 3 — LingNav 导航节点
+source /opt/ros/humble/setup.bash
+cd ~/InternNav
+
+python3 scripts/realworld2/lingnav_ros_client.py \
+    --instruction "Go to the red chair" \
+    --s2_host 192.168.1.100 \
+    --s2_port 8890 \
+    --s1_host 192.168.1.100 \
+    --s1_port 8901
+```
+
+---
+
+### 模式 B：S1 端侧完整启动
+
+NavDP (S1) **直接在 Jetson 上运行**，减少 S1 网络延迟；S2 仍在 GPU 服务器。
+
+#### B.1 GPU 服务器 — 只启动 S2（无需 navdp_server）
+
+```bash
 conda activate internnav
 cd /path/to/InternNav
 
-# 7B 模型（推荐，需约 16GB 显存）
 python scripts/realworld2/wheeltec_s2_server.py \
-    --model_path Qwen/Qwen3-VL-7B-Instruct \
+    --model_path /data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct \
     --port 8890 \
     --host 0.0.0.0 \
     --device auto
-
-# 内存不足时用 3B 版本
-python scripts/realworld2/wheeltec_s2_server.py \
-    --model_path Qwen/Qwen3-VL-3B-Instruct \
-    --port 8890 \
-    --host 0.0.0.0 \
-    --device cuda:0
 ```
 
-启动成功输出：
-```
-[S2] Loading processor from Qwen/Qwen3-VL-7B-Instruct …
-[S2] Loaded with attn_implementation=flash_attention_2
-[S2] Model ready.
-[S2] Listening on http://0.0.0.0:8890
+#### B.2 Jetson — 安装 NavDP 依赖（首次）
+
+```bash
+# torch/torchvision：JetPack 5.x 通常已自带
+pip3 install numpy requests Pillow opencv-python casadi scipy
+
+# InternNav（含 NavDP 策略网络）
+cd ~/InternNav
+pip3 install -e .
+git submodule update --init --recursive
+export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
 ```
 
-**S2 服务器参数说明：**
+#### B.3 Jetson — 启动 ROS2 客户端（端侧 S1 模式）
+
+```bash
+# Terminal 1 — 机器人底盘
+source /opt/ros/humble/setup.bash
+ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
+
+# Terminal 2 — 相机
+ros2 launch turn_on_wheeltec_robot wheeltec_camera.launch.py
+
+# Terminal 3 — LingNav 导航节点（端侧 S1）
+source /opt/ros/humble/setup.bash
+export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
+
+python3 scripts/realworld2/lingnav_ros_client.py \
+    --instruction "Go to the red chair" \
+    --s2_host 192.168.1.100 \
+    --s2_port 8890 \
+    --local_s1 \
+    --s1_checkpoint /home/wheeltec/VLN/checkpoints/navdp-weights.ckpt \
+    --s1_device cuda:0 \
+    --s1_half                    # 推荐：fp16 节省显存、加快推理
+```
+
+**端侧模式参数：**
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--model_path` | `Qwen/Qwen3-VL-7B-Instruct` | 模型 ID 或本地路径 |
-| `--port` | `8890` | 监听端口 |
-| `--device` | `auto` | `auto` 自动多卡 / `cuda:0` 指定 |
-| `--image_width` | `640` | 机器人相机宽（用于坐标转换） |
-| `--image_height` | `480` | 机器人相机高 |
-| `--resize_w` | `640` | 传入模型前的缩放宽（必须为 32 的倍数） |
-| `--resize_h` | `480` | 传入模型前的缩放高 |
-| `--max_new_tokens` | `128` | 最大生成 token 数 |
+| `--local_s1` | False | 开启 S1 端侧本地推理（无需 navdp_server） |
+| `--s1_checkpoint` | 必填 | NavDP 权重文件路径（.ckpt）|
+| `--s1_device` | `cuda:0` | NavDP 推理设备 |
+| `--s1_half` | False | 开启 fp16（Jetson 推荐，约 50% 显存节省）|
 
-### 3. 测试 S2 服务器（可选验证）
+---
+
+### 可选：服务器联调测试（无需机器人）
+
+启动 S2 和 S1 后，可在服务器上直接测试管线：
 
 ```bash
-# 连通性测试（随机图片）
+# 测试 S2 连通性（随机图片）
 python scripts/realworld2/test_s2_client.py \
-    --host 192.168.1.100 --port 8890 \
+    --host 127.0.0.1 --port 8890 \
     --random \
     --instruction "Go to the red chair"
 
-# 真实图片测试
-python scripts/realworld2/test_s2_client.py \
-    --host 192.168.1.100 --port 8890 \
-    --image /path/to/test.jpg \
-    --instruction "Navigate to the door"
-```
-
-### 4. 测试 LingNav 管线（S2 + S1 联调，不需要机器人）
-
-```bash
-# S2 + S1 均在线，使用真实图片
+# 测试 S2+S1 联合推理（真实图片）
 python scripts/realworld2/lingnav_pipeline.py \
-    --s2_host 192.168.1.100 --s2_port 8890 \
-    --s1_host 192.168.1.100 --s1_port 8901 \
+    --s2_host 127.0.0.1 --s2_port 8890 \
+    --s1_host 127.0.0.1 --s1_port 8901 \
     --image /path/to/test.jpg \
     --instruction "Go to the red chair"
 
-# 仅测试 S2 连通性（NavDP 未启动时），使用随机噪声图
+# 仅测试 S2（NavDP 未启动时）
 python scripts/realworld2/lingnav_pipeline.py \
-    --s2_host 192.168.1.100 --s2_port 8890 \
-    --s1_host 192.168.1.100 --s1_port 8901 \
-    --random \
-    --instruction "Go to the door" \
-    --skip_s1
+    --s2_host 127.0.0.1 --s2_port 8890 \
+    --s1_host 127.0.0.1 --s1_port 8901 \
+    --random --instruction "Go to the door" --skip_s1
 ```
 
 **`lingnav_pipeline.py` 参数说明：**
@@ -232,13 +295,13 @@ python scripts/realworld2/lingnav_pipeline.py \
 | `--s1_port` | `8901` | S1 端口 |
 | `--instruction` | `"Go to the red chair"` | 导航指令 |
 | `--image` | — | 真实图片路径（与 `--random` 二选一）|
-| `--random` | False | 使用随机噪声图像（连通性测试，不验证识别结果）|
-| `--skip_s1` | False | 跳过 S1 调用（NavDP 未启动时使用）|
+| `--random` | False | 使用随机噪声图（连通性测试）|
+| `--skip_s1` | False | 跳过 S1 调用（NavDP 未启动时）|
 
 **预期输出（S2+S1 均在线，真实图片）：**
 ```
 [1] 服务器连通性检查 …
-  [S2] OK  {'status': 'ok', 'model': 'Qwen/Qwen3-VL-7B-Instruct'}
+  [S2] OK  {'status': 'ok', 'model': '/data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct'}
   [S1] reachable ...
 [2] Reset pipeline …
 [LingNav] Reset. instruction='Go to the red chair'
@@ -255,107 +318,6 @@ python scripts/realworld2/lingnav_pipeline.py \
   S1 traj[0,0]  : [0.142 -0.031  0.000]  (first waypoint, meters)
   S1 values max : 1.847
 ```
-
-### 5. 启动 Jetson ROS2 客户端 — 模式 A：双服务器（原方案）
-
-**Jetson 端依赖安装（首次）：**
-
-```bash
-pip3 install numpy requests Pillow opencv-python casadi scipy \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-sudo apt install ros-humble-cv-bridge ros-humble-message-filters
-```
-
-**启动顺序（每次运行）：**
-
-```bash
-# ── Jetson 端：Terminal 1 — 启动机器人底盘
-source /opt/ros/humble/setup.bash
-ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
-
-# ── Jetson 端：Terminal 2 — 启动相机
-ros2 launch turn_on_wheeltec_robot wheeltec_camera.launch.py
-
-# ── Jetson 端：Terminal 3 — 启动 LingNav 导航客户端
-source /opt/ros/humble/setup.bash
-cd ~/InternNav
-
-python3 scripts/realworld2/lingnav_ros_client.py \
-    --instruction "Go to the red chair" \
-    --s2_host 192.168.1.100 \
-    --s1_host 192.168.1.100
-```
-
-**ROS2 客户端参数说明：**
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--instruction` | **必填** | 导航指令，如 `"Go to the red chair"` |
-| `--s2_host` | `127.0.0.1` | S2 服务器 IP |
-| `--s2_port` | `8890` | S2 端口 |
-| `--s1_host` | `127.0.0.1` | S1 服务器 IP |
-| `--s1_port` | `8901` | S1 端口 |
-| `--max_linear` | `0.25` | 最大线速度 (m/s) |
-| `--max_angular` | `0.30` | 最大角速度 (rad/s) |
-
-### 6. 启动 Jetson ROS2 客户端 — 模式 B：S1 端侧部署（新方案）
-
-NavDP 直接在 Jetson 上运行，无需启动 `navdp_server.py`。
-
-**前提：** 在 Jetson 上安装 NavDP 运行环境
-
-```bash
-# Jetson 端（首次）
-pip3 install torch torchvision   # JetPack 5.x 自带，或按官方 wheel 安装
-pip3 install numpy requests Pillow opencv-python casadi scipy
-
-# 克隆 NavDP 项目（与 InternNav 同级目录）
-cd ~
-git clone https://github.com/NavDP/NavDP  # 或本地拷贝
-export NAVDP_ROOT=~/NavDP
-
-# 确认 diffusion-policy 子模块在 PYTHONPATH
-export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
-```
-
-**启动顺序（端侧模式）：**
-
-```bash
-# ── GPU 服务器：只启动 S2，不需要 navdp_server ──
-python scripts/realworld2/wheeltec_s2_server.py \
-    --model_path Qwen/Qwen3-VL-7B-Instruct \
-    --port 8890 --host 0.0.0.0 --device auto
-
-# ── Jetson 端：Terminal 1 — 启动机器人底盘
-source /opt/ros/humble/setup.bash
-ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
-
-# ── Jetson 端：Terminal 2 — 启动相机
-ros2 launch turn_on_wheeltec_robot wheeltec_camera.launch.py
-
-# ── Jetson 端：Terminal 3 — 启动 LingNav（端侧 S1 模式）
-source /opt/ros/humble/setup.bash
-export NAVDP_ROOT=~/NavDP
-export PYTHONPATH=$PYTHONPATH:~/InternNav/src/diffusion-policy
-
-python3 scripts/realworld2/lingnav_ros_client.py \
-    --instruction "Go to the red chair" \
-    --s2_host 192.168.1.100 \
-    --local_s1 \
-    --s1_checkpoint ~/NavDP/checkpoints/navdp.ckpt \
-    --s1_device cuda:0 \
-    --s1_half                  # 推荐：fp16 节省显存、加快推理
-```
-
-**端侧模式新增参数：**
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--local_s1` | False | 开启 S1 端侧本地推理（无需 navdp_server） |
-| `--s1_checkpoint` | 必填 | NavDP 权重文件路径（.ckpt）|
-| `--s1_device` | `cuda:0` | NavDP 推理设备 |
-| `--s1_half` | False | 开启 fp16（Jetson 推荐，约 50% 显存节省）|
 
 ---
 

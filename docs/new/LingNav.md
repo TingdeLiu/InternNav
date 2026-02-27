@@ -265,11 +265,17 @@ python3 scripts/realworld2/lingnav_ros_client.py \
 启动 S2 和 S1 后，可在服务器上直接测试管线：
 
 ```bash
-# 测试 S2 连通性（随机图片）
+# 本地测试 S2 连通性
+python scripts/realworld2/test_s2_client.py \
+    --host 服务器IP --port 8890 \
+    --image /GitHub/InternNav/data/debug_raw_000.jpg \
+    --instruction "Go to the black chair"s
+
+# 服务器上测试 S2 连通性
 python scripts/realworld2/test_s2_client.py \
     --host 127.0.0.1 --port 8890 \
-    --random \
-    --instruction "Go to the red chair"
+    --image /data3/ltd/Qwen3-VL/debug_raw_000.jpg \
+    --instruction "Go to the black chair"
 
 # 测试 S2+S1 联合推理（真实图片）
 python scripts/realworld2/lingnav_pipeline.py \

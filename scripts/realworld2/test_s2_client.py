@@ -46,7 +46,18 @@ def call_s2(host: str, port: int, image_bytes: bytes, instruction: str) -> dict:
         data={"instruction": instruction},
         timeout=60,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # Print server-side error details before raising
+        try:
+            body = resp.json()
+            print(f"\n[Server ERROR {resp.status_code}]")
+            print(f"  error    : {body.get('error', '(no error field)')}")
+            tb = body.get("traceback", "")
+            if tb:
+                print(f"  traceback:\n{tb}")
+        except Exception:
+            print(f"\n[Server ERROR {resp.status_code}] raw body: {resp.text[:2000]}")
+        resp.raise_for_status()
     return resp.json()
 
 

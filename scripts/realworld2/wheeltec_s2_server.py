@@ -21,7 +21,7 @@ API:
 """
 
 import argparse
-import base64
+import io
 import json
 import re
 import sys
@@ -108,17 +108,13 @@ def load_model(model_path: str, device: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Inference
 # ─────────────────────────────────────────────────────────────────────────────
-def _image_to_data_uri(image_bytes: bytes) -> str:
-    """Encode raw image bytes as a base64 data URI (supported by Qwen3-VL)."""
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    return f"data:image;base64,{b64}"
-
-
 def run_inference(image_bytes: bytes, instruction: str) -> str:
     """Call Qwen3-VL and return the raw text output."""
     import torch
+    from PIL import Image
+    from qwen_vl_utils import process_vision_info
 
-    data_uri = _image_to_data_uri(image_bytes)
+    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
     messages = [
         {
@@ -130,9 +126,7 @@ def run_inference(image_bytes: bytes, instruction: str) -> str:
             "content": [
                 {
                     "type": "image",
-                    "image": data_uri,
-                    # Resize to model-friendly resolution (multiples of 32).
-                    # Keeps the original 4:3 aspect if width/height set to 640/480.
+                    "image": pil_image,
                     "resized_width": cfg.resize_w,
                     "resized_height": cfg.resize_h,
                 },
@@ -141,27 +135,29 @@ def run_inference(image_bytes: bytes, instruction: str) -> str:
         },
     ]
 
-    inputs = processor.apply_chat_template(
+    # Standard Qwen3-VL inference path via process_vision_info
+    text = processor.apply_chat_template(
         messages,
-        tokenize=True,
+        tokenize=False,
         add_generation_prompt=True,
-        return_dict=True,
+    )
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs if video_inputs else None,
+        padding=True,
         return_tensors="pt",
     )
 
-    # Move inputs to the device that holds the first model parameter.
-    # Works regardless of whether device_map="auto" spans multiple GPUs.
     target_device = next(model.parameters()).device
-    inputs = {
-        k: v.to(target_device) if hasattr(v, "to") else v
-        for k, v in inputs.items()
-    }
+    inputs = inputs.to(target_device)
 
     with torch.inference_mode():
         generated_ids = model.generate(
             **inputs,
             max_new_tokens=cfg.max_new_tokens,
-            do_sample=False,        # greedy — deterministic, no temperature needed
+            do_sample=False,
             use_cache=True,
         )
 

@@ -73,7 +73,6 @@ Output strictly one JSON array. Each element corresponds to one atomic task.
 - Output only the raw JSON array, no explanatory text, no preamble, no closing remarks, no markdown code block markers
 - Array element order must strictly follow the execution order of the instruction
 - Visual coordinates must be based on actual image content, refuse hallucination
-```
 
 ---
 
@@ -206,56 +205,131 @@ def run_inference(image_bytes: bytes, instruction: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 _NAV_PATTERN = re.compile(r"[←→↑↓]+|stop|start")
 _JSON_PATTERN = re.compile(r"\{[^{}]+\}", re.DOTALL)
+_CODE_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove ```json ... ``` or ``` ... ``` wrappers if present."""
+    m = _CODE_FENCE.search(text)
+    return m.group(1) if m else text
+
+
+def _extract_json_array(text: str):
+    """Find and parse the first JSON array in text (handles nested structures)."""
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    for i, c in enumerate(text[start:], start):
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+    return None
+
+
+def _norm_to_pixel(nx: float, ny: float):
+    """Convert [0, 1000] normalised coords to clamped pixel (u, v)."""
+    u = max(0, min(cfg.image_width - 1,  int(nx / 1000.0 * cfg.image_width)))
+    v = max(0, min(cfg.image_height - 1, int(ny / 1000.0 * cfg.image_height)))
+    return u, v
 
 
 def parse_output(raw: str) -> dict:
     """
-    Parse the two-line model output:
-      Line 1: {"target": "chair", "point_2d": [320, 240]}
-      Line 2: ↑↑←
+    Parse model output in either the new JSON-array format or the legacy two-line format.
+
+    New format (JSON array of task objects):
+      [
+        {"task": "move", "action": "←", "number": 4},
+        {"task": "pixel_point", "target": "black chair", "point_2d": [710, 220]}
+      ]
+
+    Legacy format (two lines):
+      {"target": "chair", "point_2d": [320, 240]}
+      ↑↑←
 
     Returns:
       target          – string or None
       point_2d_norm   – [x, y] in [0, 1000] or None
       point_2d_pixel  – [u, v] in actual image pixels or None
-      navigation      – concatenated nav symbols, e.g. "↑↑←←" or "stop"
+      navigation      – concatenated nav symbols, e.g. "↑↑←←←←" or "stop"
       raw             – original model output (for debugging)
     """
     target = None
     point_2d_norm = None
     point_2d_pixel = None
+    navigation = ""
 
-    # ── JSON block ────────────────────────────────────────────────────────────
-    json_match = _JSON_PATTERN.search(raw)
+    # Strip markdown code fences that the model may add despite instructions
+    clean = _strip_code_fence(raw)
+
+    # ── New format: JSON array of tasks ──────────────────────────────────────
+    tasks = _extract_json_array(clean)
+    if isinstance(tasks, list):
+        nav_parts = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_type = task.get("task")
+
+            if task_type == "pixel_point":
+                norm = task.get("point_2d")
+                if isinstance(norm, (list, tuple)) and len(norm) == 2 and norm[0] is not None:
+                    nx, ny = float(norm[0]), float(norm[1])
+                    u, v = _norm_to_pixel(nx, ny)
+                    task["point_2d_pixel"] = [u, v]   # 供 pipeline 直接使用，无需再转换
+                else:
+                    task["point_2d_pixel"] = None
+                if target is None:
+                    target = task.get("target")
+                    if task.get("point_2d_pixel") is not None:
+                        point_2d_norm = [int(nx), int(ny)]
+                        point_2d_pixel = task["point_2d_pixel"]
+
+            elif task_type == "move":
+                action = task.get("action", "")
+                number = max(1, int(task.get("number", 1)))
+                nav_parts.append("stop" if action == "stop" else action * number)
+
+        navigation = "".join(nav_parts)
+        return {
+            "raw": raw,
+            "tasks": tasks,          # 原始任务列表，供 pipeline 顺序执行
+            "target": target,
+            "point_2d_norm": point_2d_norm,
+            "point_2d_pixel": point_2d_pixel,
+            "navigation": navigation,
+        }
+
+    # ── Fallback: legacy two-line format ─────────────────────────────────────
+    json_match = _JSON_PATTERN.search(clean)
     if json_match:
         try:
             data = json.loads(json_match.group())
-            target = data.get("target")            # None or string
-            norm = data.get("point_2d")            # None or [x, y]
-
-            if norm is not None and isinstance(norm, (list, tuple)) and len(norm) == 2:
+            target = data.get("target")
+            norm = data.get("point_2d")
+            if isinstance(norm, (list, tuple)) and len(norm) == 2:
                 nx, ny = float(norm[0]), float(norm[1])
                 point_2d_norm = [int(nx), int(ny)]
-
-                # Convert [0, 1000] → pixel coords; clamp to valid range
-                u = int(nx / 1000.0 * cfg.image_width)
-                v = int(ny / 1000.0 * cfg.image_height)
-                u = max(0, min(cfg.image_width - 1, u))
-                v = max(0, min(cfg.image_height - 1, v))
+                u, v = _norm_to_pixel(nx, ny)
                 point_2d_pixel = [u, v]
-
         except (json.JSONDecodeError, TypeError, ValueError):
-            pass  # leave as None, raw output still returned for debugging
+            pass
 
-    # ── Navigation symbols ────────────────────────────────────────────────────
-    nav_parts = _NAV_PATTERN.findall(raw)
-    navigation = "".join(nav_parts)   # e.g. "↑↑←←" or "stop" or ""
+    nav_parts = _NAV_PATTERN.findall(clean)
+    navigation = "".join(nav_parts)
 
     return {
         "raw": raw,
         "target": target,
-        "point_2d_norm": point_2d_norm,    # [0, 1000] scale
-        "point_2d_pixel": point_2d_pixel,  # actual pixel (u, v)
+        "point_2d_norm": point_2d_norm,
+        "point_2d_pixel": point_2d_pixel,
         "navigation": navigation,
     }
 
@@ -331,15 +405,17 @@ def main():
         help="device_map value: 'auto', 'cuda:0', 'cuda:1', 'cpu', …",
     )
     # Camera / image dimensions (used for pixel coordinate conversion)
-    parser.add_argument("--image_width",  type=int, default=640,
-                        help="Robot camera width in pixels (Astra S default: 640)")
-    parser.add_argument("--image_height", type=int, default=480,
-                        help="Robot camera height in pixels (Astra S default: 480)")
-    # Resolution fed to the model (multiples of 32; can be smaller for faster inference)
+    parser.add_argument("--image_width",  type=int, default=1280,
+                        help="Robot camera width in pixels  (Gemini 336L: 1280 | Astra S: 640)")
+    parser.add_argument("--image_height", type=int, default=720,
+                        help="Robot camera height in pixels (Gemini 336L: 720  | Astra S: 480)")
+    # Resolution fed to the model (multiples of 32)
+    # Gemini 336L: 640×360 keeps 16:9 aspect ratio
+    # Astra S:     640×480 keeps 4:3 aspect ratio
     parser.add_argument("--resize_w", type=int, default=640,
                         help="Image width passed to Qwen3-VL (rounded up to multiple of 32)")
-    parser.add_argument("--resize_h", type=int, default=480,
-                        help="Image height passed to Qwen3-VL (rounded up to multiple of 32)")
+    parser.add_argument("--resize_h", type=int, default=360,
+                        help="Image height passed to Qwen3-VL (Gemini 336L: 360 | Astra S: 480)")
     parser.add_argument("--max_new_tokens", type=int, default=128,
                         help="Maximum tokens to generate per request")
 

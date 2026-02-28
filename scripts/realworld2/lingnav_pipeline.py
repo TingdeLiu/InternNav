@@ -45,7 +45,17 @@ for p in (_ROOT, _NAVDP_DIR):
 
 from navdp_client import NavDPClient  # noqa: E402  (scripts/inference/NavDP/navdp_client.py)
 
-# Astra S 相机默认内参 (640×480)
+# Gemini 336L 相机内参 (1280×720) — 当前默认相机
+# fx=607.45, fy=607.40, cx=639.19, cy=361.75
+GEMINI_336L_INTRINSIC = np.array([
+    [607.45, 0.0, 639.19, 0.0],
+    [0.0, 607.40, 361.75, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+], dtype=np.float64)
+
+# Astra S 相机内参 (640×480) — 备用，切换时将下方默认值改为此常量
+# fx=570.3, fy=570.3, cx=319.5, cy=239.5
 ASTRA_S_INTRINSIC = np.array([
     [570.3, 0.0, 319.5, 0.0],
     [0.0, 570.3, 239.5, 0.0],
@@ -70,7 +80,7 @@ class LingNavPipeline:
         s1_host / s1_port   : S1 NavDP 服务器地址（本地模式时忽略）
         s1_client           : 若传入，直接使用该客户端（NavDPLocalClient 或自定义）；
                               为 None 时自动创建 NavDPClient(s1_host, s1_port)
-        camera_intrinsic    : (4,4) 相机内参矩阵（默认 Astra S 640×480）
+        camera_intrinsic    : (4,4) 相机内参矩阵（默认 Gemini 336L 1280×720）
         s2_timeout          : S2 HTTP 超时秒数
         s1_timeout          : S1 HTTP 超时秒数（本地模式时不使用）
     """
@@ -94,10 +104,13 @@ class LingNavPipeline:
         self.s1_timeout = s1_timeout
 
         self.camera_intrinsic = (
-            camera_intrinsic if camera_intrinsic is not None else ASTRA_S_INTRINSIC
+            camera_intrinsic if camera_intrinsic is not None else GEMINI_336L_INTRINSIC
         )
         self.instruction: str = ""
         self._s1_initialized: bool = False
+        self._task_queue: list = []         # 顺序任务队列（S2 填充，逐个弹出执行）
+        self._stop_threshold: float = -3.0  # NavDP Critic 到达阈值
+        self._tasks_loaded: bool = False    # 本 episode 是否已加载过任务
 
     # ──────────────────────────────────────────────────────────────────────────
     # Episode control
@@ -106,6 +119,9 @@ class LingNavPipeline:
     def reset(self, instruction: str, stop_threshold: float = -3.0) -> None:
         """新 episode 开始时调用：设置指令，重置 S1 记忆队列。"""
         self.instruction = instruction
+        self._task_queue = []
+        self._stop_threshold = stop_threshold
+        self._tasks_loaded = False
         self.navdp.reset(
             camera_intrinsic=self.camera_intrinsic,
             batch_size=1,
@@ -148,46 +164,84 @@ class LingNavPipeline:
         if not self._s1_initialized:
             return {"mode": "error", "message": "call reset() before step()"}
 
-        # ── Step 1: 请求 S2 ──────────────────────────────────────────────────
-        try:
-            s2_result = self._call_s2(rgb_bgr, self.instruction)
-        except Exception as exc:
-            return {"mode": "error", "message": f"S2 request failed: {exc}"}
+        # ── 所有任务已完成 ────────────────────────────────────────────────────
+        if self._tasks_loaded and not self._task_queue:
+            return {"mode": "stop"}
 
-        nav = s2_result.get("navigation", "")
-        pixel = s2_result.get("point_2d_pixel")   # [u, v] or None
-
-        # ── Step 2: 路由 ─────────────────────────────────────────────────────
-
-        # 停止
-        if "stop" in nav:
-            return {"mode": "stop", "s2": s2_result}
-
-        # 目标可见 → 调用 S1 NavDP pixelgoal
-        if pixel is not None:
+        # ── 队列为空时查询 S2 填充任务 ────────────────────────────────────────
+        if not self._task_queue:
             try:
-                traj, all_traj, values = self._call_s1_pixelgoal(
-                    rgb_bgr, depth_m, pixel
-                )
+                s2_result = self._call_s2(rgb_bgr, self.instruction)
+            except Exception as exc:
+                return {"mode": "error", "message": f"S2 request failed: {exc}"}
+            self._populate_task_queue(s2_result)
+            self._tasks_loaded = True
+            if not self._task_queue:
                 return {
-                    "mode": "trajectory",
-                    "trajectory": traj,          # (1, 24, 3)
-                    "all_trajectory": all_traj,  # (1, N, 24, 3)
-                    "values": values,            # (1, N)
-                    "target": s2_result.get("target"),
-                    "pixel": pixel,
+                    "mode": "error",
+                    "message": "S2 returned no actionable tasks",
                     "s2": s2_result,
                 }
-            except Exception as exc:
-                return {"mode": "error", "message": f"S1 request failed: {exc}", "s2": s2_result}
 
-        # 目标不可见但有旋转指令 → 旋转
-        if nav and any(c in nav for c in ("←", "→")):
-            rotation_rad = _parse_rotation(nav)
-            return {"mode": "rotate", "rotation_rad": rotation_rad, "s2": s2_result}
+        task = self._task_queue[0]
 
-        # S2 无有效输出
-        return {"mode": "error", "message": "S2 returned no actionable output", "s2": s2_result}
+        # ── stop 任务 ─────────────────────────────────────────────────────────
+        if task["type"] == "stop":
+            self._task_queue.pop(0)
+            return {"mode": "stop"}
+
+        # ── move 任务（旋转）──────────────────────────────────────────────────
+        if task["type"] == "move":
+            rad = task["rotation_rad"]
+            self._task_queue.pop(0)
+            print(
+                f"[LingNav] task=move | {task['symbols']!r} → {math.degrees(rad):.1f}° "
+                f"| remaining={len(self._task_queue)}",
+                flush=True,
+            )
+            return {"mode": "rotate", "rotation_rad": rad}
+
+        # ── pixel_point 任务（目标导航）───────────────────────────────────────
+        if task["type"] == "pixel_point":
+            target = task["target"]
+            pixel  = task.get("pixel")   # 队列填充时存入的初始像素坐标
+
+            # 目标可见：直接调 S1，无需刷新 S2
+            # NavDP memory queue 能处理机器人移动后的坐标偏差
+            if pixel is not None:
+                try:
+                    traj, all_traj, values = self._call_s1_pixelgoal(
+                        rgb_bgr, depth_m, pixel
+                    )
+                except Exception as exc:
+                    return {"mode": "error", "message": f"S1 request failed: {exc}"}
+
+                # NavDP Critic 判定到达 → 弹出任务，下一步自动执行后续任务
+                if float(values.max()) < self._stop_threshold:
+                    self._task_queue.pop(0)
+                    print(
+                        f"[LingNav] task=pixel_point done (NavDP Critic) | target={target!r} "
+                        f"| remaining={len(self._task_queue)}",
+                        flush=True,
+                    )
+
+                return {
+                    "mode": "trajectory",
+                    "trajectory": traj,
+                    "all_trajectory": all_traj,
+                    "values": values,
+                    "target": target,
+                    "pixel": pixel,
+                }
+
+            # 目标初始不可见 → 固定搜索旋转，依赖 NavDP 能力完成导航
+            print(
+                f"[LingNav] task=pixel_point | target={target!r} pixel=None → search rotate",
+                flush=True,
+            )
+            return {"mode": "rotate", "rotation_rad": math.radians(15)}
+
+        return {"mode": "error", "message": f"Unknown task type: {task['type']}"}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -220,6 +274,68 @@ class LingNavPipeline:
         rgb_batch   = rgb_bgr[np.newaxis]                                  # (1, H, W, 3)
         depth_batch = depth_m[np.newaxis, :, :, np.newaxis]               # (1, H, W, 1)
         return self.navdp.pixelgoal_step(pixel_goals, rgb_batch, depth_batch)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Task queue management
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _populate_task_queue(self, s2_result: dict) -> None:
+        """将 S2 响应中的结构化任务列表解析为顺序任务队列。
+
+        支持新格式（含 tasks 字段）和旧版服务器兼容（无 tasks 字段）。
+        """
+        raw_tasks = s2_result.get("tasks") or []
+        queue: list = []
+
+        for task in raw_tasks:
+            task_type = task.get("task")
+            if task_type == "pixel_point":
+                target = task.get("target")
+                if target:
+                    queue.append({
+                        "type": "pixel_point",
+                        "target": target,
+                        "pixel": task.get("point_2d_pixel"),  # None 表示初始不可见
+                    })
+            elif task_type == "move":
+                action = task.get("action", "")
+                number = max(1, int(task.get("number", 1)))
+                if action == "stop":
+                    queue.append({"type": "stop"})
+                elif action in ("←", "→"):
+                    symbols = action * number
+                    queue.append({
+                        "type": "move",
+                        "symbols": symbols,
+                        "rotation_rad": _parse_rotation(symbols),
+                    })
+                # ↑ ↓ 暂不实现，跳过
+
+        # 旧版服务器兼容：无 tasks 字段时退化为单任务逻辑
+        if not queue:
+            queue = self._legacy_task_queue(s2_result)
+
+        self._task_queue = queue
+        print(
+            f"[LingNav] task queue ({len(queue)}): {[t['type'] for t in queue]}",
+            flush=True,
+        )
+
+    def _legacy_task_queue(self, s2_result: dict) -> list:
+        """兼容旧版服务器（无 tasks 字段）：从折叠字段重建单任务队列。"""
+        nav    = s2_result.get("navigation", "")
+        pixel  = s2_result.get("point_2d_pixel")
+        target = s2_result.get("target")
+
+        if "stop" in nav:
+            return [{"type": "stop"}]
+        if pixel is not None and target:
+            return [{"type": "pixel_point", "target": target}]
+        if nav and any(c in nav for c in ("←", "→")):
+            return [{"type": "move", "symbols": nav, "rotation_rad": _parse_rotation(nav)}]
+        if target:
+            return [{"type": "pixel_point", "target": target}]
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -141,8 +141,7 @@ class NavDPLocalClient:
             pixel_goals, rgb_images, depth_images
         )
         # best_traj: (B, T, 3); all_traj: (B, N, T, 3); all_vals: (B, N)
-        # 包装为 (B, 1, T, 3) 与 NavDPClient 返回的 all_trajectory shape 一致
-        return best_traj[:, np.newaxis], all_traj, all_vals
+        return best_traj, all_traj, all_vals
 
     def pointgoal_step(
         self,
@@ -157,7 +156,7 @@ class NavDPLocalClient:
         best_traj, all_traj, all_vals, _ = self._agent.step_pointgoal(
             point_goals, rgb_images, depth_images
         )
-        return best_traj[:, np.newaxis], all_traj, all_vals
+        return best_traj, all_traj, all_vals
 
     def nogoal_step(
         self,
@@ -171,4 +170,4 @@ class NavDPLocalClient:
         best_traj, all_traj, all_vals, _ = self._agent.step_nogoal(
             rgb_images, depth_images
         )
-        return best_traj[:, np.newaxis], all_traj, all_vals
+        return best_traj, all_traj, all_vals

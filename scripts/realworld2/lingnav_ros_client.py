@@ -52,7 +52,7 @@ _REALWORLD = _ROOT / "scripts" / "realworld"        # wheeltec_controllers æ‰€åœ
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_REALWORLD))
 
-from lingnav_pipeline import ASTRA_S_INTRINSIC, LingNavPipeline   # noqa: E402
+from lingnav_pipeline import GEMINI_336L_INTRINSIC, LingNavPipeline   # noqa: E402
 from wheeltec_controllers import Mpc_controller, PID_controller    # noqa: E402
 from wheeltec_thread_utils import ReadWriteLock                    # noqa: E402
 
@@ -114,7 +114,7 @@ class LingNavNode(Node):
             s2_host=cfg.s2_host, s2_port=cfg.s2_port,
             s1_host=cfg.s1_host, s1_port=cfg.s1_port,
             s1_client=s1_client,
-            camera_intrinsic=ASTRA_S_INTRINSIC,
+            camera_intrinsic=GEMINI_336L_INTRINSIC,
         )
         self.pipeline.reset(cfg.instruction)
 

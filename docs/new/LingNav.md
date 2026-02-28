@@ -209,7 +209,7 @@ python scripts/realworld2/wheeltec_s2_server.py \
     --model_path /data2/ltd/checkpoints/Qwen3-VL/Qwen3-VL-8B-Instruct \
     --port 8890 \
     --host 0.0.0.0 \
-    --device auto
+    --device cuda:7 
 ```
 
 #### B.2 Jetson — 安装 NavDP 依赖（首次）
@@ -269,7 +269,7 @@ python3 scripts/realworld2/lingnav_ros_client.py \
 python scripts/realworld2/test_s2_client.py \
     --host 服务器IP --port 8890 \
     --image /GitHub/InternNav/data/debug_raw_000.jpg \
-    --instruction "Go to the black chair"s
+    --instruction "Go to the black chair"
 
 # 服务器上测试 S2 连通性
 python scripts/realworld2/test_s2_client.py \
